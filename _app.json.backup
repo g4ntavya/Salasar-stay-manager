@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "07ee5900-2c3b-40ef-aa2c-0fdac6d014c0"
+      }
+    },
+    "android": {
+      "package": "com.gantavyaaa.appsalasarmainmainmain2"
+    }
+  }
+}

@@ -1,0 +1,72 @@
+env: load .env
+env: export EXPO_PUBLIC_FIREBASE_API_KEY EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN EXPO_PUBLIC_FIREBASE_PROJECT_ID EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID EXPO_PUBLIC_FIREBASE_APP_ID EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID EXPO_PUBLIC_FIREBASE_DATABASE_URL
+Starting project at /Users/yashkatiyar/Desktop/app-salasar-main/frontend
+Metro is running in CI mode, reloads are disabled. Remove CI=true to enable watch mode.
+Starting Metro Bundler
+warning: Bundler cache is empty, rebuilding (this may take a minute)
+The following packages should be updated for best compatibility with the installed expo version:
+  @expo/vector-icons@14.1.0 - expected version: ^15.0.3
+  @react-native-community/datetimepicker@8.5.0 - expected version: 8.4.4
+  expo-blur@14.1.5 - expected version: ~15.0.7
+  expo-constants@17.1.7 - expected version: ~18.0.10
+  expo-font@13.3.2 - expected version: ~14.0.9
+  expo-haptics@14.1.4 - expected version: ~15.0.7
+  expo-image@2.4.0 - expected version: ~3.0.10
+  expo-linking@7.1.7 - expected version: ~8.0.9
+  expo-router@5.1.4 - expected version: ~6.0.15
+  expo-splash-screen@0.30.10 - expected version: ~31.0.11
+  expo-status-bar@2.2.3 - expected version: ~3.0.8
+  expo-symbols@0.4.5 - expected version: ~1.0.7
+  expo-system-ui@5.0.10 - expected version: ~6.0.8
+  expo-web-browser@14.2.0 - expected version: ~15.0.9
+  react-native-gesture-handler@2.24.0 - expected version: ~2.28.0
+  react-native-reanimated@3.17.5 - expected version: ~4.1.1
+  react-native-safe-area-context@5.4.0 - expected version: ~5.6.0
+  react-native-screens@4.11.1 - expected version: ~4.16.0
+  react-native-web@0.20.0 - expected version: ^0.21.0
+  react-native-webview@13.13.5 - expected version: 13.15.0
+  eslint-config-expo@9.2.0 - expected version: ~10.0.0
+  typescript@5.8.3 - expected version: ~5.9.2
+Your project may not work correctly until you install the expected versions of the packages.
+Waiting on http://localhost:8083
+Logs for your project will appear below.
+Web node_modules/expo-router/entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Web node_modules/expo-router/entry.js ▓▓▓▓▓▓▓▓░░░░░░░░ 51.1% (437/624)
+λ node_modules/expo-router/node/render.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 70.8% (546/649)
+λ Bundled 5651ms node_modules/expo-router/node/render.js (967 modules)
+
+Metro error: _reactJsxDevRuntime.jsxDEV is not a function
+
+  TypeError: _reactJsxDevRuntime.jsxDEV is not a function
+    at apply (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo-router/build/static/renderStaticContent.js:91:7)
+    at getStaticContent (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo/node_modules/@expo/cli/src/start/server/getStaticRenderFunctions.ts:115:25)
+    at bundleStaticHtml (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo/node_modules/@expo/cli/src/start/server/metro/MetroBundlerDevServer.ts:495:20)
+    at async Promise.all (index 1)
+    at MetroBundlerDevServer.getStaticPageAsync (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo/node_modules/@expo/cli/src/start/server/metro/MetroBundlerDevServer.ts:498:52)
+    at getHtml (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo/node_modules/@expo/cli/src/start/server/metro/createServerRouteMiddleware.ts:78:31)
+    at requestHandler (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo-server/src/vendor/abstract.ts:143:22)
+    at /Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo-server/src/runtime/index.ts:83:13
+    at requestHandler (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo-server/src/vendor/http.ts:47:14)
+    at /Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo-server/src/vendor/http.ts:67:24
+Web node_modules/expo-router/entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 97.2% (836/848)
+Web Bundled 6438ms node_modules/expo-router/entry.js (848 modules)
+λ Bundled 15ms node_modules/expo-router/node/render.js (1 module)
+
+Metro error: _reactJsxDevRuntime.jsxDEV is not a function
+
+  TypeError: _reactJsxDevRuntime.jsxDEV is not a function
+    at apply (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo-router/build/static/renderStaticContent.js:91:7)
+    at getStaticContent (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo/node_modules/@expo/cli/src/start/server/getStaticRenderFunctions.ts:115:25)
+    at bundleStaticHtml (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo/node_modules/@expo/cli/src/start/server/metro/MetroBundlerDevServer.ts:495:20)
+    at async Promise.all (index 1)
+    at MetroBundlerDevServer.getStaticPageAsync (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo/node_modules/@expo/cli/src/start/server/metro/MetroBundlerDevServer.ts:498:52)
+    at getHtml (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo/node_modules/@expo/cli/src/start/server/metro/createServerRouteMiddleware.ts:78:31)
+    at requestHandler (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo-server/src/vendor/abstract.ts:165:28)
+    at /Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo-server/src/runtime/index.ts:83:13
+    at requestHandler (/Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo-server/src/vendor/http.ts:47:14)
+    at /Users/yashkatiyar/Desktop/app-salasar-main/frontend/node_modules/expo-server/src/vendor/http.ts:67:24
+Web node_modules/expo-router/_error.js ░░░░░░░░░░░░░░░░  1.0% (1/1)
+Web node_modules/expo-router/entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Web Bundled 196ms node_modules/expo-router/entry.js (1 module)
+Web Bundled 234ms node_modules/expo-router/_error.js (1 module)
+ LOG  [web] Logs will appear in the browser console
