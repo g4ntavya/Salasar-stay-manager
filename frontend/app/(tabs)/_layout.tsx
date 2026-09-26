@@ -3,9 +3,14 @@ import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useAuth } from '../../src/context/AuthContext';
+
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
   const bottomInset = Math.max(insets.bottom, 12);
+  const { profile } = useAuth();
+  const isGrowthUser = profile?.role === 'GROWTH';
+
   return (
     <Tabs
       screenOptions={{
@@ -31,12 +36,14 @@ export default function TabLayout() {
         headerTitleStyle: {
           fontWeight: 'bold',
         },
+        lazy: false,
       }}
     >
       <Tabs.Screen
         name="dashboard"
         options={{
           title: 'Dashboard',
+          href: isGrowthUser ? null : undefined,
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="home" size={size} color={color} />
           ),
@@ -46,8 +53,19 @@ export default function TabLayout() {
         name="bookings"
         options={{
           title: 'Bookings',
+          href: isGrowthUser ? null : undefined,
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="calendar" size={size} color={color} />
+            <Ionicons name="calendar-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="analytics"
+        options={{
+          title: 'Growth',
+          href: isGrowthUser ? undefined : null,
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="trending-up" size={size} color={color} />
           ),
         }}
       />
@@ -55,6 +73,7 @@ export default function TabLayout() {
         name="rooms"
         options={{
           title: 'Rooms',
+          href: isGrowthUser ? null : undefined,
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="bed" size={size} color={color} />
           ),
@@ -64,6 +83,7 @@ export default function TabLayout() {
         name="customers"
         options={{
           title: 'Customers',
+          href: isGrowthUser ? null : undefined,
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="people" size={size} color={color} />
           ),
@@ -73,6 +93,7 @@ export default function TabLayout() {
         name="profile"
         options={{
           title: 'Profile',
+          href: isGrowthUser ? null : undefined,
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="person" size={size} color={color} />
           ),

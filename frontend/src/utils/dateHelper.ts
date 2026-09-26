@@ -1,17 +1,17 @@
 export const formatDate = (dateString: string): string => {
   const date = new Date(dateString);
-  return date.toLocaleDateString('en-IN', { 
-    day: '2-digit', 
-    month: 'short', 
-    year: 'numeric' 
+  return date.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
   });
 };
 
 export const formatDateTime = (dateString: string): string => {
   const date = new Date(dateString);
-  return date.toLocaleString('en-IN', { 
-    day: '2-digit', 
-    month: 'short', 
+  return date.toLocaleString('en-IN', {
+    day: '2-digit',
+    month: 'short',
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit'
@@ -33,5 +33,8 @@ export const calculateNights = (checkIn: string, checkOut: string): number => {
 };
 
 export const formatDateForInput = (date: Date): string => {
-  return date.toISOString().split('T')[0];
+  const d = date;
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
 };

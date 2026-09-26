@@ -10,9 +10,9 @@ import {
   ScrollView,
   Image,
   ActivityIndicator,
-  SafeAreaView,
 } from 'react-native';
-import { useAuth } from '../src/context/AuthContext';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useAuth, homeRouteFor } from '../src/context/AuthContext';
 import { useRouter } from 'expo-router';
 
 const LoginScreen = () => {
@@ -33,8 +33,8 @@ const LoginScreen = () => {
     setLoading(true);
 
     try {
-      await signIn(email, password);
-      router.replace('/dashboard');
+      const profile = await signIn(email, password);
+      router.replace(homeRouteFor(profile.role));
     } catch (err: any) {
       setError(err.message || 'Failed to sign in. Please check your credentials.');
     } finally {
@@ -68,7 +68,7 @@ const LoginScreen = () => {
               <Text style={styles.label}>Email</Text>
               <TextInput
                 style={styles.input}
-                placeholder="admin@salasar.com"
+                placeholder="Email"
                 placeholderTextColor="#6b7280"
                 value={email}
                 onChangeText={setEmail}

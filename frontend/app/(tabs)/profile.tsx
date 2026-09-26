@@ -6,15 +6,19 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
+
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../src/context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
 import LoadingSpinner from '../../src/components/LoadingSpinner';
+import { rebuildMonthlyStats } from '../../src/utils/rtdbService';
 
 const ProfileScreen = () => {
   const router = useRouter();
   const { user, profile, loading, signOut } = useAuth();
+
+
 
   const handleSignOut = () => {
     Alert.alert(
@@ -39,6 +43,8 @@ const ProfileScreen = () => {
     );
   };
 
+
+
   if (loading && !profile) {
     return <LoadingSpinner message="Loading profile..." />;
   }
@@ -53,18 +59,8 @@ const ProfileScreen = () => {
     return <LoadingSpinner message="Redirecting..." />;
   }
 
-  const effectiveProfile =
-    profile ||
-    (user && {
-      full_name: user.displayName || user.email || 'User',
-      email: user.email || 'N/A',
-      role:
-        (user.displayName || '').trim().toLowerCase() === 'sarita rohilla' ||
-        (user.email || '').trim().toLowerCase() === 'sarita@salasar.com'
-          ? 'ADMIN'
-          : 'STAFF',
-      id: user.uid,
-    });
+  // Roles come only from users/{uid} in the database (enforced by security rules).
+  const effectiveProfile = profile;
 
   if (!effectiveProfile) {
     return (
@@ -153,6 +149,58 @@ const ProfileScreen = () => {
                 <Ionicons name="checkmark-circle" size={20} color="#10b981" />
                 <Text style={styles.permissionText}>Delete Bookings</Text>
               </View>
+            </>
+          )}
+        </View>
+      </View>
+
+      {/* Management Section */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Management</Text>
+        <View style={styles.managementList}>
+          {effectiveProfile.role === 'ADMIN' && (
+            <>
+              <TouchableOpacity
+                style={styles.managementItem}
+                onPress={() => router.push('/reports' as any)}
+              >
+                <View style={styles.managementIconContainer}>
+                  <Ionicons name="bar-chart" size={20} color="#dc2626" />
+                </View>
+                <Text style={styles.managementText}>Reports & Analytics</Text>
+                <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.managementItem}
+                onPress={() => {
+                  Alert.alert(
+                    'Sync Analytics',
+                    'This will scan your entire booking history to repair the reports index. This may take a moment. Continue?',
+                    [
+                      { text: 'Cancel', style: 'cancel' },
+                      {
+                        text: 'Sync Now',
+                        onPress: async () => {
+                          try {
+                            const result = await rebuildMonthlyStats();
+                            Alert.alert('Success', `Reports synchronized! Processed ${result?.count || 0} bookings.`);
+                          } catch (error) {
+                            console.error('Sync error:', error);
+                            Alert.alert('Error', 'Failed to sync data.');
+                          }
+                        }
+                      }
+                    ]
+                  );
+                }}
+              >
+                <View style={[styles.managementIconContainer, { backgroundColor: '#d1fae5' }]}>
+                  <Ionicons name="refresh-circle" size={20} color="#059669" />
+                </View>
+                <Text style={styles.managementText}>Sync Analytics Data</Text>
+                <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
+              </TouchableOpacity>
             </>
           )}
         </View>
@@ -263,6 +311,31 @@ const styles = StyleSheet.create({
   permissionText: {
     fontSize: 16,
     color: '#4b5563',
+  },
+  managementList: {
+    gap: 12,
+  },
+  managementItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  managementIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#fee2e2',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  managementText: {
+    flex: 1,
+    fontSize: 16,
+    color: '#1f2937',
+    fontWeight: '500',
   },
   signOutButton: {
     backgroundColor: '#dc2626',

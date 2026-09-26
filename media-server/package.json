@@ -1,0 +1,16 @@
+{
+  "name": "salasar-media-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ID photo storage and guest archive for the Salasar app (runs on the Oracle VM)",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "firebase-admin": "^12.7.0"
+  }
+}

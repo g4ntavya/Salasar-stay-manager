@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { useRouter } from 'expo-router';
-import { useAuth } from '../src/context/AuthContext';
+import { useAuth, homeRouteFor } from '../src/context/AuthContext';
 import LoadingSpinner from '../src/components/LoadingSpinner';
 
 export default function Index() {
@@ -9,11 +9,9 @@ export default function Index() {
 
   useEffect(() => {
     if (loading) return;
-    if (!user && !profile) {
-      router.replace('/login');
-    } else {
-      router.replace('/dashboard');
-    }
+    // Only a confirmed Firebase session with an authorized profile enters the app.
+    if (user && profile) router.replace(homeRouteFor(profile.role));
+    else router.replace('/login');
   }, [user, profile, loading, router]);
 
   return <LoadingSpinner message="Restoring session..." />;

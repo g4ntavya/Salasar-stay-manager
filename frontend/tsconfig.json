@@ -1,24 +1,33 @@
 {
-  "extends": "expo/tsconfig.base",
   "compilerOptions": {
-    "types": ["react-native"],
-    "strict": true,
+    "jsx": "react-native",
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
     "paths": {
       "@/*": [
         "./*"
-      ],
-      "firebase/auth": [
-        "./node_modules/firebase/node_modules/@firebase/auth/dist/cordova/index.rn.d.ts"
-      ],
-      "@firebase/auth": [
-        "./node_modules/firebase/node_modules/@firebase/auth/dist/rn/index.rn.d.ts"
       ]
-    }
+    },
+    "strict": true,
+    "lib": [
+      "esnext",
+      "dom"
+    ],
+    "target": "ESNext",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "allowJs": true,
+    "resolveJsonModule": true
   },
   "include": [
     "**/*.ts",
     "**/*.tsx",
     ".expo/types/**/*.ts",
     "expo-env.d.ts"
-  ]
+  ],
+  "exclude": [
+    "node_modules",
+    "src/firebase/config.ts"
+  ],
+  "extends": "expo/tsconfig.base"
 }

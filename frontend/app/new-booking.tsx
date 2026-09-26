@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -13,31 +13,31 @@ import {
   Image,
   Pressable,
 } from 'react-native';
-import { collection, getDocs, query, Timestamp, where, onSnapshot } from 'firebase/firestore';
+// Firestore no longer used — room availability uses RTDB directly
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import LoadingSpinner from '../src/components/LoadingSpinner';
 import {
-  createBooking,
+  createBookings,
   createCustomer,
   subscribeAvailableRooms,
+  subscribeToActiveBookings,
   RtdbRoom,
   compareRoomIds,
   normalizeRoomId,
-  fetchCustomers,
   normalizeBookingStatus,
 } from '../src/utils/rtdbService';
 import { getCached, setCached } from '../src/utils/cache';
-import { db, rtdb } from '../src/firebase/firebase';
 import { defaultRoomSeeds } from '../src/utils/defaultRooms';
 import { TOTAL_ROOMS } from '../src/utils/roomConstants';
-import { get, ref as rtdbRef, query as rtdbQuery, orderByChild, limitToLast } from 'firebase/database';
+import { parseAmount, describeAmount } from '../src/utils/amount';
+import { localDay } from '../src/utils/date';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
 
 const NewBookingScreen: React.FC = () => {
+  const MAX_ID_IMAGES = 3;
   const router = useRouter();
 
   const formatDate = (date: Date | null) =>
@@ -51,6 +51,8 @@ const NewBookingScreen: React.FC = () => {
   const [vehicleNumber, setVehicleNumber] = useState('');
   const [address, setAddress] = useState('');
   const [amount, setAmount] = useState('');
+  const [tokenAmount, setTokenAmount] = useState(''); // Token/advance for advance bookings
+  const [paymentMode, setPaymentMode] = useState<'CASH' | 'UPI'>('CASH');
 
   // ID Proof
   const [idNumber, setIdNumber] = useState('');
@@ -72,7 +74,7 @@ const NewBookingScreen: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [loadingRooms, setLoadingRooms] = useState(false);
   const [roomsErrorShown, setRoomsErrorShown] = useState(false);
-  const excludedRooms = useMemo(() => new Set(['1', '107', '110']), []);
+  const excludedRooms = useMemo(() => new Set(['1']), []);
   const fallbackRooms = useMemo(
     () =>
       defaultRoomSeeds
@@ -93,6 +95,18 @@ const NewBookingScreen: React.FC = () => {
   );
   const [rooms, setRooms] = useState<RtdbRoom[]>(() => fallbackRooms);
   const [unavailableRooms, setUnavailableRooms] = useState<Set<string>>(new Set());
+  const [activeBookings, setActiveBookings] = useState<any[]>([]);
+  const parsedAmount = useMemo(() => parseAmount(amount, paymentMode), [amount, paymentMode]);
+
+  // Determine if this is an advance booking (check-in date is in the future)
+  const isAdvanceBooking = useMemo(() => {
+    if (!checkInDate) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const checkIn = new Date(checkInDate);
+    checkIn.setHours(0, 0, 0, 0);
+    return checkIn > today;
+  }, [checkInDate]);
 
   // Helper to determine if a room is unavailable. Reused for styling and handlers.
   const isRoomUnavailable = (roomNo: string, room?: RtdbRoom) => {
@@ -129,6 +143,8 @@ const NewBookingScreen: React.FC = () => {
     setVehicleNumber('');
     setAddress('');
     setAmount('');
+    setTokenAmount('');
+    setPaymentMode('CASH');
     setIdNumber('');
     setIdImageUrl('');
     setIdImageUrls([]);
@@ -155,7 +171,7 @@ const NewBookingScreen: React.FC = () => {
       (liveRooms) => {
         const usable = buildAvailableList(liveRooms);
         setRooms(usable);
-        setCached('rooms:available', liveRooms).catch(() => {}); // Cache for next load
+        setCached('rooms:available', liveRooms).catch(() => { }); // Cache for next load
         setSelectedRooms((current) => {
           const stillValid = current.filter((r) => usable.find((u) => u.key === r.key));
           return stillValid.length > 0 ? stillValid : [];
@@ -188,8 +204,7 @@ const NewBookingScreen: React.FC = () => {
   const normalizeToDate = (value: any): Date | null => {
     if (!value) return null;
     if (value instanceof Date) return value;
-    if (value instanceof Timestamp) return value.toDate();
-    if (typeof value.toDate === 'function') return value.toDate();
+    if (typeof value?.toDate === 'function') return value.toDate();
     if (typeof value === 'string') {
       const parsed = new Date(value);
       if (!Number.isNaN(parsed.getTime())) return parsed;
@@ -205,99 +220,38 @@ const NewBookingScreen: React.FC = () => {
     return { start, end };
   };
 
-  // 🔥 LIVE PREDICTION GREY-OUT BASED ON CHECK-IN & CHECK-OUT RANGE (Debounced)
+  // Live list of current and upcoming bookings, shared with the dashboard (no extra download).
+  useEffect(() => subscribeToActiveBookings(setActiveBookings), []);
+
+  // Grey out rooms whose open bookings overlap the selected stay dates.
   useEffect(() => {
-    const debounceTimer = setTimeout(() => {
-      const start = checkInDate || selectedDate || new Date();
-      const end = checkOutDate || checkInDate || selectedDate || new Date();
-      if (!start || !end) {
-        setUnavailableRooms(new Set());
-        return;
-      }
+    const start = checkInDate || selectedDate || new Date();
+    const end = checkOutDate || checkInDate || selectedDate || new Date();
     const rangeStart = new Date(start);
     const rangeEnd = new Date(end);
     if (rangeEnd < rangeStart) rangeEnd.setTime(rangeStart.getTime());
     rangeStart.setHours(0, 0, 0, 0);
     rangeEnd.setHours(23, 59, 59, 999);
 
-    const bookingsRef = collection(db, 'bookings');
-      const bookingsQuery = query(
-        bookingsRef,
-        where('check_in', '<=', Timestamp.fromDate(rangeEnd)),
-        where('check_out', '>=', Timestamp.fromDate(rangeStart))
-      );
-
-    const mergeFromRtdbBookings = async (existing: Set<string>) => {
-      try {
-        const snap = await get(rtdbRef(rtdb, 'bookings'));
-        const val = snap.val() || {};
-        Object.values<any>(val).forEach((b: any) => {
-          const status = (b?.status ?? '').toString().toLowerCase();
-          if (status === 'checked_out' || status === 'checkedout') return;
-          const roomNoRaw = b?.room_no ?? b?.roomNo;
-          const roomNo = normalizeRoomId(roomNoRaw);
-          if (!roomNo) return;
-          const bookingCheckIn = normalizeToDate(b?.checkInDate ?? b?.check_in ?? b?.checkIn);
-          const bookingCheckOut = normalizeToDate(
-            b?.checkOutDate ?? b?.check_out ?? b?.checkOut ?? b?.checkoutDate
-          );
-          if (!bookingCheckIn || !bookingCheckOut) return;
-          const overlaps =
-            bookingCheckIn.getTime() <= rangeEnd.getTime() &&
-            bookingCheckOut.getTime() >= rangeStart.getTime();
-          if (overlaps) existing.add(roomNo);
-        });
-      } catch (err) {
-        console.warn('RTDB bookings read failed; continuing with Firestore data.', err);
+    const occupied = new Set<string>();
+    activeBookings.forEach((b: any) => {
+      const status = normalizeBookingStatus(b?.status);
+      if (status === 'CHECKED_OUT' || status === 'CANCELLED') return;
+      const roomNo = normalizeRoomId(b?.roomNo ?? b?.room_no);
+      const bookingCheckIn = normalizeToDate(b?.checkInDate);
+      const bookingCheckOut = normalizeToDate(b?.checkOutDate);
+      if (!roomNo || !bookingCheckIn || !bookingCheckOut) return;
+      if (bookingCheckIn.getTime() <= rangeEnd.getTime() && bookingCheckOut.getTime() >= rangeStart.getTime()) {
+        occupied.add(roomNo);
       }
-      return existing;
-    };
+    });
 
-    const applyUnavailable = async (occupied: Set<string>) => {
-      // Merge RTDB room flags (occupied/current_booking_id)
-      rooms.forEach((room) => {
-        if (room.is_available === false || room.current_booking_id) {
-          occupied.add(room.room_no);
-        }
-      });
-      setUnavailableRooms(occupied);
-    };
-
-    const unsub = onSnapshot(
-      bookingsQuery,
-      async (snap) => {
-        const occupied = new Set<string>();
-
-        snap.forEach((doc) => {
-          const data = doc.data();
-          if (!data) return;
-
-          const status = (data.status ?? '').toString().toLowerCase();
-          if (status === 'checked_out') return;
-
-          const roomNo = normalizeRoomId(data.room_no ?? data.roomNo);
-          if (!roomNo) return;
-
-          occupied.add(roomNo);
-        });
-
-        const merged = await mergeFromRtdbBookings(occupied);
-        applyUnavailable(merged);
-      },
-      async (error) => {
-        console.warn('Firestore bookings subscription failed; falling back to RTDB.', error);
-        const occupied = await mergeFromRtdbBookings(new Set<string>());
-        applyUnavailable(occupied);
-      }
-    );
-
-    return () => unsub();
-    }, 300); // Debounce 300ms
-
-    return () => {
-      clearTimeout(debounceTimer);
-    };
-  }, [checkInDate, checkOutDate, selectedDate, rooms]);
+    // Rooms currently flagged occupied are unavailable too.
+    rooms.forEach((room) => {
+      if (room.is_available === false || room.current_booking_id) occupied.add(room.room_no);
+    });
+    setUnavailableRooms(occupied);
+  }, [checkInDate, checkOutDate, selectedDate, rooms, activeBookings]);
 
   useEffect(() => {
     // Auto-adjust selected rooms if any become unavailable
@@ -340,7 +294,7 @@ const NewBookingScreen: React.FC = () => {
       });
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const asset = result.assets[0];
-        const dataUri = await assetToDataUri(asset);
+        const dataUri = await assetToDataUri(asset, 0);
         if (dataUri) {
           setIdImageUrl(dataUri);
           setIdImageUrls((prev) => [...prev, dataUri]);
@@ -365,12 +319,13 @@ const NewBookingScreen: React.FC = () => {
         base64: true,
         allowsMultipleSelection: true,
         selectionLimit: 5,
-        allowsEditing: true, // freeform crop
+        allowsEditing: false, // 🔥 ENTERPRISE: Disable editing for multi-select as it causes issues on some devices
       });
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const newUris: string[] = [];
-        for (const asset of result.assets) {
-          const dataUri = await assetToDataUri(asset);
+        for (let i = 0; i < result.assets.length; i++) {
+          const asset = result.assets[i];
+          const dataUri = await assetToDataUri(asset, i);
           if (dataUri) newUris.push(dataUri);
         }
         if (newUris.length > 0) {
@@ -394,18 +349,21 @@ const NewBookingScreen: React.FC = () => {
     setIdImageUrls((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  const assetToDataUri = async (asset: ImagePicker.ImagePickerAsset) => {
+  const assetToDataUri = async (asset: ImagePicker.ImagePickerAsset, idx: number = 0) => {
     const mime = asset.mimeType || 'image/jpeg';
-    if (asset.base64) {
-      return `data:${mime};base64,${asset.base64}`;
+    
+    // 🔥 ENTERPRISE FIX: Always return a file:// URI (no base64) to keep caches tiny and staff-visible
+    if (asset.uri && !asset.uri.startsWith('data:')) {
+      return asset.uri;
     }
-    if (asset.uri) {
+
+    if (asset.base64) {
       try {
-        const base64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: 'base64' });
-        return `data:${mime};base64,${base64}`;
+        const { saveBase64ToFile } = require('../src/utils/imageStorage');
+        return await saveBase64ToFile(`data:${mime};base64,${asset.base64}`, 'temp_new_booking', idx);
       } catch (e) {
-        console.warn('Failed to read image as base64', e);
-        return asset.uri;
+        console.warn('[NewBooking] Failed to persist base64 image, falling back to data URI', e);
+        return `data:${mime};base64,${asset.base64}`;
       }
     }
     return null;
@@ -439,6 +397,10 @@ const NewBookingScreen: React.FC = () => {
       Alert.alert('Missing Info', 'Amount is required');
       return false;
     }
+    if (parsedAmount.total <= 0) {
+      Alert.alert('Invalid Amount', 'Enter the amount as a number, e.g. 1500 or 1000p, 500c (p = UPI, c = cash).');
+      return false;
+    }
     if (selectedRooms.length === 0) {
       Alert.alert('Missing Info', 'Please select at least one available room');
       return false;
@@ -465,16 +427,25 @@ const NewBookingScreen: React.FC = () => {
     return true;
   };
 
+  const submissionLock = useRef(false);
+
   const handleCreateBooking = async () => {
+    if (submissionLock.current) {
+      console.log('[NewBooking] Blocked duplicate submission attempt');
+      return;
+    }
+
     if (!validateForm() || selectedRooms.length === 0 || !checkInDate || !checkOutDate) return;
 
     const members = Number.parseInt(membersCount, 10) || 0;
 
+    submissionLock.current = true;
     setIsSubmitting(true);
+
     try {
       console.log('[NewBooking] Starting booking creation process');
       console.log('[NewBooking] Selected rooms:', selectedRooms.map(r => r.room_no));
-      
+
       const customerId = await createCustomer({
         guestName: guestName.trim(),
         fatherName: fatherName.trim() || undefined,
@@ -490,164 +461,120 @@ const NewBookingScreen: React.FC = () => {
         selectedRoom: selectedRooms.map((r) => r.room_no).join(','),
         idImageUrls,
         idImageUrl: idImageUrls[0] ?? idImageUrl ?? undefined,
+        paymentMode,
       });
       console.log('[NewBooking] Customer created with ID:', customerId);
 
-      // Create all bookings in parallel for better performance
-      console.log('[NewBooking] Creating bookings for rooms:', selectedRooms.map(r => r.room_no));
-      await Promise.all(
-        selectedRooms.map((room) =>
-          createBooking(
-            customerId,
-            room.room_no.toString(),
-            checkInDate.toISOString(),
-            checkOutDate.toISOString()
-          )
-        )
+      // ──────────── OPTIMISTIC CUSTOMER CACHE WITH LOCAL IMAGES ────────────
+      try {
+        const primaryImage = idImageUrls[0] || idImageUrl || undefined;
+        const optimisticCustomer = {
+          id: customerId,
+          name: guestName.trim() || 'Guest',
+          guestName: guestName.trim() || 'Guest',
+          mobile: mobileNumber.trim(),
+          mobileNumber: mobileNumber.trim(),
+          address: address.trim() || '',
+          city: '',
+          vehicleNumber: vehicleNumber.trim() || '',
+          amount: amount.trim() || '',
+          checkInDate: checkInDate.toISOString(),
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          idImageUrls: idImageUrls.slice(0, MAX_ID_IMAGES),
+          idImageUrl: primaryImage,
+        };
+
+        const recentCached = (await getCached<any[]>('customers:recent')) || [];
+        const listCached = (await getCached<any[]>('customers:list')) || [];
+
+        const mergeUnique = (arr: any[]) => {
+          const seen = new Set<string>();
+          const merged: any[] = [];
+          [optimisticCustomer, ...arr].forEach(c => {
+            const key = c?.id || c?.mobile || Math.random().toString();
+            if (seen.has(key)) return;
+            seen.add(key);
+            merged.push(c);
+          });
+          return merged;
+        };
+
+        await Promise.all([
+          setCached('customers:recent', mergeUnique(recentCached)),
+          setCached('customers:list', mergeUnique(listCached)),
+        ]);
+        console.log('[NewBooking] ✅ Optimistic customer cached with local images');
+      } catch (cacheErr) {
+        console.warn('[NewBooking] Unable to cache optimistic customer (non-critical):', cacheErr);
+      }
+
+      // All rooms of the stay are booked in one atomic write.
+      await createBookings(
+        customerId,
+        selectedRooms.map((room) => room.room_no.toString()),
+        checkInDate.toISOString(),
+        checkOutDate.toISOString(),
+        paymentMode,
+        {
+          amountRaw: amount.trim(),
+          tokenAmount: Number(tokenAmount) || 0,
+          guestName: guestName.trim(),
+          membersCount: parseInt(membersCount, 10) || 1,
+          mobile: mobileNumber.trim(),
+        }
       );
 
-      console.log('[NewBooking] All bookings created successfully');
-      
+      // ──────────── OPTIMISTIC CACHE UPDATE (INSTANT REFLECTION) ────────────
+      try {
+        console.log('[NewBooking] Performing optimistic cache update...');
+
+        // 1. Update dashboard stats optimistically
+        const cachedStats = await getCached<any>('dashboard:stats');
+        if (cachedStats) {
+          const todayStr = localDay();
+          const checkInStr = localDay(checkInDate);
+
+          // Only mark as occupied now if check-in is today or earlier.
+          if (checkInStr <= todayStr) {
+            const newOccupiedRoomNos = [...(cachedStats.occupiedRoomNos || [])];
+            selectedRooms.forEach(r => {
+              if (!newOccupiedRoomNos.includes(r.room_no)) {
+                newOccupiedRoomNos.push(r.room_no);
+              }
+            });
+            const occupiedCount = newOccupiedRoomNos.length;
+            const optimisticStats = {
+              ...cachedStats,
+              occupiedRooms: occupiedCount,
+              availableRooms: (cachedStats.totalRooms || TOTAL_ROOMS) - occupiedCount,
+              occupiedRoomNos: newOccupiedRoomNos.sort(),
+            };
+            await setCached('dashboard:stats', optimisticStats);
+            console.log('[NewBooking] ✅ Dashboard stats updated optimistically');
+          }
+        }
+
+        // 2. Invalidate bookings cache to force fresh fetch (customers already updated optimistically)
+        await setCached('bookings:list', null);
+        console.log('[NewBooking] ✅ Bookings cache invalidated for fresh fetch');
+
+      } catch (cacheErr) {
+        console.warn('[NewBooking] Optimistic cache update failed (non-critical):', cacheErr);
+      }
+
       Alert.alert('Success', 'Booking created successfully!');
       resetForm();
-      
-      // Fetch fresh data in background AFTER navigation (non-blocking)
+
+      // Navigate to dashboard
       router.push('/(tabs)/dashboard' as any);
-      
-      // Background refresh with timeout protection
-      setTimeout(async () => {
-        try {
-          console.log('[NewBooking] Fetching fresh data in background...');
-          
-          // Fetch bookings with the same logic as bookings tab
-          let bookingsSnap;
-          try {
-            const bookingsQ = rtdbQuery(rtdbRef(rtdb, 'bookings'), orderByChild('createdAt'), limitToLast(200));
-            bookingsSnap = await get(bookingsQ);
-          } catch (err) {
-            bookingsSnap = await get(rtdbRef(rtdb, 'bookings'));
-          }
-          
-          const [customersSnap, roomsSnap] = await Promise.all([
-            get(rtdbRef(rtdb, 'customers')),
-            get(rtdbRef(rtdb, 'rooms')),
-          ]);
 
-          const bookingsVal = bookingsSnap.val() || {};
-          const customersVal = customersSnap.val() || {};
-          const roomsVal = roomsSnap.val() || {};
-
-          // Build room lookup
-          const roomLookup = new Map<string, { key: string; data: any }>();
-          Object.entries(roomsVal).forEach(([key, room]: any) => {
-            const roomNo = room.room_no?.toString();
-            if (roomNo) roomLookup.set(roomNo, { key, data: room });
-          });
-
-          // Map bookings
-          const mapped = Object.entries(bookingsVal).map(([id, value]: any) => {
-            const booking = value as any;
-            const customer = customersVal[booking.customerId];
-            const roomInfo = roomLookup.get(booking.roomNo?.toString());
-            const roomData = roomInfo?.data;
-            const roomKey = roomInfo?.key;
-            
-            const normalizedStatus = normalizeBookingStatus(booking.status);
-            const roomAvailable = roomData?.is_available !== false && !roomData?.current_booking_id;
-
-            const amountVal = customer?.city || customer?.amount || '';
-            const parsedAmount = Number(amountVal) || 0;
-            return {
-              id,
-              customer_id: booking.customerId || '',
-              room_id: roomKey || booking.roomNo || '',
-              check_in: booking.checkInDate,
-              check_out_expected: booking.checkOutDate || booking.checkoutDate,
-              check_out_actual: booking.checkOutActual || booking.checkoutDate,
-              status: normalizedStatus,
-              total_amount: parsedAmount,
-              created_by: '',
-              created_at: booking.createdAt ? new Date(booking.createdAt).toISOString() : '',
-              customer: customer
-                ? {
-                    id: booking.customerId,
-                    name: customer.name || 'Guest',
-                    father_name: customer.father_name || '',
-                    address: customer.address || '',
-                    city: customer.city || '',
-                    mobile: customer.phone || '',
-                    member_count: customer.member_count || 0,
-                    vehicle_number: customer.vehicle_number || '',
-                    id_type: customer.id_type || '',
-                    id_number_masked: customer.id_number || '',
-                    created_at: customer.createdAt ? new Date(customer.createdAt).toISOString() : '',
-                  }
-                : undefined,
-              room: roomData
-                ? {
-                    id: roomKey || booking.roomNo || '',
-                    room_number: roomData.room_no?.toString() || booking.roomNo || '',
-                    type: roomData.type || 'Room',
-                    capacity: roomData.beds || 1,
-                    price_per_night: 0,
-                    status: roomAvailable ? 'AVAILABLE' : 'OCCUPIED',
-                    current_booking_id: roomData.current_booking_id,
-                  }
-                : undefined,
-            };
-          });
-
-          const sorted = mapped.sort((a, b) => (a.created_at > b.created_at ? -1 : 1));
-          
-          // Group by customer
-          const groupedMap = new Map<string, any>();
-          for (const b of sorted) {
-            const groupKey = b.customer_id || b.customer?.mobile || b.customer?.name || b.id;
-            const roomNo = b.room?.room_number || b.room_id?.toString() || '';
-            const existing = groupedMap.get(groupKey);
-            if (existing) {
-              if (roomNo && !existing.room_numbers.includes(roomNo)) existing.room_numbers.push(roomNo);
-            } else {
-              groupedMap.set(groupKey, { ...b, room_numbers: roomNo ? [roomNo] : [] });
-            }
-          }
-          const grouped = Array.from(groupedMap.values());
-
-          // Calculate fresh dashboard stats
-          const roomsArray = Object.entries(roomsVal).map(([key, room]: any) => ({ key, ...room }));
-          const totalRooms = roomsArray.length;
-          const occupiedRooms = roomsArray.filter((r: any) => r.current_booking_id).length;
-          const availableRooms = totalRooms - occupiedRooms;
-          const occupiedRoomNos = roomsArray
-            .filter((r: any) => r.current_booking_id)
-            .map((r: any) => r.room_no || r.roomNumber)
-            .sort();
-          
-          const freshDashboardStats = { totalRooms, availableRooms, occupiedRooms, occupiedRoomNos };
-
-          // Update all caches with fresh data
-          await Promise.all([
-            setCached('bookings:list', grouped),
-            setCached('rooms:list', roomsArray),
-            setCached('dashboard:stats', freshDashboardStats), // Update dashboard with fresh stats
-            setCached('customers:list', Object.entries(customersVal).map(([id, customer]: any) => ({ id, ...customer }))),
-          ]);
-          
-          console.log('[NewBooking] ✅ All caches updated with fresh data');
-        } catch (err) {
-          console.error('[NewBooking] Background refresh failed:', err);
-        }
-      }, 500); // Small delay to ensure navigation completes first
     } catch (error: any) {
       console.error('[NewBooking] Error creating booking:', error);
-      console.error('[NewBooking] Error details:', {
-        message: error?.message,
-        code: error?.code,
-        stack: error?.stack
-      });
       Alert.alert('Error', error?.message || 'Failed to create booking. Please try again.');
     } finally {
       setIsSubmitting(false);
+      submissionLock.current = false;
     }
   };
 
@@ -781,25 +708,74 @@ const NewBookingScreen: React.FC = () => {
             value={address}
             onChangeText={setAddress}
           />
-        <TextInput
-          style={styles.input}
-          placeholder="Amount *"
-          placeholderTextColor={placeholderColor}
-          value={amount}
-          onChangeText={setAmount}
-          keyboardType="default"
-        />
+          <TextInput
+            style={styles.input}
+            placeholder="Amount * (e.g. 1500 or 1000p, 500c)"
+            placeholderTextColor={placeholderColor}
+            value={amount}
+            onChangeText={setAmount}
+            keyboardType="default"
+          />
+          {amount.trim() !== '' && (
+            <Text style={[styles.tokenHelpText, parsedAmount.total > 0 ? styles.tokenPaid : styles.tokenUnpaid]}>
+              {parsedAmount.total > 0
+                ? `Total ${describeAmount(parsedAmount)}`
+                : 'Could not read an amount. Use numbers like 1500 or 1000p, 500c'}
+            </Text>
+          )}
+
+          {/* Token field - only visible for advance bookings */}
+          {isAdvanceBooking && (
+            <View>
+              <TextInput
+                style={[
+                  styles.input,
+                  Number(tokenAmount) > 0 && styles.inputSuccess
+                ]}
+                placeholder="Token Amount (optional)"
+                placeholderTextColor={placeholderColor}
+                value={tokenAmount}
+                onChangeText={setTokenAmount}
+                keyboardType="numeric"
+              />
+              <Text style={[
+                styles.tokenHelpText,
+                Number(tokenAmount) > 0 ? styles.tokenPaid : styles.tokenUnpaid
+              ]}>
+                {Number(tokenAmount) > 0
+                  ? `✓ PAID - Token ₹${tokenAmount} received`
+                  : '○ UNPAID - Enter token if advance received'}
+              </Text>
+            </View>
+          )}
+
+          <View style={styles.paymentContainer}>
+            <TouchableOpacity
+              style={[styles.paymentButton, paymentMode === 'CASH' && styles.paymentButtonActive]}
+              onPress={() => setPaymentMode('CASH')}
+            >
+              <Ionicons name="cash-outline" size={20} color={paymentMode === 'CASH' ? '#fff' : '#4b5563'} />
+              <Text style={[styles.paymentButtonText, paymentMode === 'CASH' && styles.paymentButtonTextActive]}>Cash</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.paymentButton, paymentMode === 'UPI' && styles.paymentButtonActive]}
+              onPress={() => setPaymentMode('UPI')}
+            >
+              <Ionicons name="qr-code-outline" size={20} color={paymentMode === 'UPI' ? '#fff' : '#4b5563'} />
+              <Text style={[styles.paymentButtonText, paymentMode === 'UPI' && styles.paymentButtonTextActive]}>UPI</Text>
+            </TouchableOpacity>
+          </View>
 
           <Text style={styles.sectionTitle}>ID Proof</Text>
           <TextInput style={styles.input} value="Aadhaar" editable={false} />
-        <TextInput
-          style={styles.input}
-          placeholder="ID Number (optional)"
-          placeholderTextColor={placeholderColor}
-          value={idNumber}
-          onChangeText={setIdNumber}
-          keyboardType="default"
-        />
+          <TextInput
+            style={styles.input}
+            placeholder="ID Number (optional)"
+            placeholderTextColor={placeholderColor}
+            value={idNumber}
+            onChangeText={setIdNumber}
+            keyboardType="default"
+          />
           <View style={styles.inputRow}>
             <TextInput
               style={[styles.input, { flex: 1 }]}
@@ -838,7 +814,7 @@ const NewBookingScreen: React.FC = () => {
             <View style={styles.previewList}>
               {idImageUrls.map((uri, idx) => (
                 <View key={idx} style={styles.previewItem}>
-                  <Image source={{ uri }} style={styles.previewImage} />
+                  <Image source={uri ? { uri } : require('../assets/images/icon.png')} style={styles.previewImage} />
                   <Pressable style={styles.removeThumb} onPress={() => removeImageAt(idx)}>
                     <Ionicons name="close" size={16} color="#fff" />
                   </Pressable>
@@ -907,6 +883,7 @@ const NewBookingScreen: React.FC = () => {
             </Text>
           </TouchableOpacity>
 
+
           <Text style={styles.sectionTitle}>Select Room</Text>
           {loadingRooms ? (
             <View style={styles.loadingRow}>
@@ -932,7 +909,7 @@ const NewBookingScreen: React.FC = () => {
                     ]}
                     onPress={() => handleSelectRoom(room)}
                     disabled={isUnavailable}
-                >
+                  >
                     {isUnavailable && (
                       <>
                         <View style={styles.unavailableStripe} />
@@ -949,27 +926,43 @@ const NewBookingScreen: React.FC = () => {
                       ]}
                     >
                       {(() => {
-                        const isBasementOrCommon = 
+                        const roomNo = room.room_no;
+                        const isBasementOrCommon =
                           room.type.toLowerCase().includes('basement') ||
                           room.type.toLowerCase().includes('common') ||
                           room.room_no.toLowerCase().includes('basement') ||
                           room.room_no.toLowerCase().startsWith('cb');
-                        
-                        const isSpecialHall = room.room_no === '302' || room.room_no === '304';
-                        
+
                         if (isBasementOrCommon) {
-                          // Just show the room number (e.g., "Basement 1" or "CB1")
-                          return room.room_no;
+                          return roomNo;
                         }
-                        
-                        // Regular rooms: "Room {number} – {type} – {beds} bed(s)"
-                        let display = `Room ${room.room_no}`;
-                        if (formatRoomType(room.type)) {
-                          display += ` – ${formatRoomType(room.type)}`;
+
+                        if (roomNo === '302') return 'Room 302 (Small Hall Non AC)';
+                        if (roomNo === '304') return 'Room 304 (Hall AC)';
+
+                        let display = `Room ${roomNo}`;
+
+                        if (roomNo === '107' || roomNo === '110') {
+                          // Skip AC labels for these rooms
+                        } else {
+                          const acRooms = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '101', '102', '103', '105', '106', '107', '110', '112', '114', '115', '116', '201', '202', '203', '204', '205', '206', '207', '208', '209', '210', '303', '304', '306', '307', '108', '109'];
+
+                          const type = (room.type || '').toUpperCase();
+                          const isExplicitNonAc = type.includes('NON AC') || type.includes('NON-AC');
+                          const isExplicitAc = type.includes('AC');
+                          const isInAcList = acRooms.includes(roomNo);
+
+                          if (isExplicitNonAc) {
+                            display += ' (Non AC)';
+                          } else if (isExplicitAc || isInAcList) {
+                            display += ' (AC)';
+                          }
                         }
-                        if (!isSpecialHall) {
+
+                        if (room.beds > 0) {
                           display += ` – ${room.beds} bed${room.beds === 1 ? '' : 's'}`;
                         }
+
                         return display;
                       })()}
                     </Text>
@@ -1056,6 +1049,23 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '700',
   },
+  tokenHelpText: {
+    fontSize: 13,
+    marginTop: 4,
+    marginBottom: 8,
+    fontWeight: '600',
+  },
+  tokenPaid: {
+    color: '#16a34a',
+  },
+  tokenUnpaid: {
+    color: '#9ca3af',
+    fontStyle: 'italic',
+  },
+  inputSuccess: {
+    borderColor: '#16a34a',
+    borderWidth: 2,
+  },
   imageRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1097,6 +1107,36 @@ const styles = StyleSheet.create({
   clearImageText: {
     color: '#dc2626',
     fontWeight: '600',
+  },
+  paymentContainer: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 8,
+    marginBottom: 16,
+  },
+  paymentButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#fff',
+  },
+  paymentButtonActive: {
+    backgroundColor: '#dc2626',
+    borderColor: '#dc2626',
+  },
+  paymentButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#4b5563',
+  },
+  paymentButtonTextActive: {
+    color: '#fff',
   },
   previewImage: {
     marginTop: 8,
@@ -1241,7 +1281,7 @@ const styles = StyleSheet.create({
   submitButtonText: {
     color: '#fff',
     fontSize: 18,
-    fontWeight: '600',
+    fontWeight: '700',
   },
 });
 

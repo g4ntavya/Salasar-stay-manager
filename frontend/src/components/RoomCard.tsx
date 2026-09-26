@@ -10,23 +10,29 @@ interface RoomCardProps {
 
 const RoomCard: React.FC<RoomCardProps> = ({ room, onPress }) => {
   const isSpecialHall = room.room_number === '302' || room.room_number === '304';
-  const cleanType = (value: string) => value.replace(/standard/gi, '').trim();
-  const displayType = cleanType(room.type);
-  
+
+  // Robust check for room.type to prevent crash
+  const cleanType = (value: string) => (value || '').replace(/standard/gi, '').trim();
+  const displayType = cleanType(room.type || '');
+
   // Check if this is a basement or common bathroom
-  const isBasementOrCommon = 
-    room.type.toLowerCase().includes('basement') ||
-    room.type.toLowerCase().includes('common') ||
-    room.room_number.toLowerCase().includes('basement') ||
-    room.room_number.toLowerCase().startsWith('cb');
-  
+  const typeStr = (room.type || '').toLowerCase();
+  const roomNumStr = (room.room_number || '').toLowerCase();
+  const isBasementOrCommon =
+    typeStr.includes('basement') ||
+    typeStr.includes('common') ||
+    roomNumStr.includes('basement') ||
+    roomNumStr.startsWith('cb');
+
+  const acRooms = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '101', '102', '103', '105', '106', '107', '110', '112', '114', '115', '116', '201', '202', '203', '204', '205', '206', '207', '208', '209', '210', '303', '304', '306', '307', '108', '109'];
+
   const hideCapacity =
-    room.type.toLowerCase().includes('standard') ||
+    (room.type || '').toLowerCase().includes('standard') ||
     isBasementOrCommon ||
     isSpecialHall;
-  
+
   const displayNumber = isBasementOrCommon ? room.room_number : `Room ${room.room_number}`;
-  
+
   return (
     <TouchableOpacity style={styles.card} onPress={onPress}>
       <View style={styles.header}>
@@ -34,9 +40,31 @@ const RoomCard: React.FC<RoomCardProps> = ({ room, onPress }) => {
         <StatusBadge status={room.status} small />
       </View>
       <View style={styles.details}>
-        {!isBasementOrCommon && displayType ? <Text style={styles.type}>{displayType}</Text> : null}
-        {!hideCapacity && (
-          <Text style={styles.info}>Capacity: {room.capacity}</Text>
+        {(() => {
+          if (isBasementOrCommon) return null;
+          if (room.room_number === '302') return <Text style={styles.type}>Small Hall (Non AC)</Text>;
+          if (room.room_number === '304') return <Text style={styles.type}>Hall (AC)</Text>;
+          if (room.room_number === '107' || room.room_number === '110') return null;
+
+          const type = (room.type || '').toUpperCase();
+          let display = '';
+
+          const isExplicitNonAc = type.includes('NON AC') || type.includes('NON-AC');
+          const isExplicitAc = type.includes('AC');
+          const isInAcList = acRooms.includes(room.room_number);
+
+          if (isExplicitNonAc) {
+            display = 'Non AC';
+          } else if (isExplicitAc || isInAcList) {
+            display = 'AC';
+          } else {
+            display = cleanType(room.type);
+          }
+
+          return <Text style={styles.type}>{display}</Text>;
+        })()}
+        {!hideCapacity && room.capacity > 0 && (
+          <Text style={styles.info}>Capacity: {room.capacity} Bed{room.capacity === 1 ? '' : 's'}</Text>
         )}
       </View>
     </TouchableOpacity>
@@ -78,12 +106,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#6b7280',
     marginBottom: 4,
-  },
-  price: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#dc2626',
-    marginTop: 4,
   },
 });
 

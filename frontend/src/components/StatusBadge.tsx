@@ -13,15 +13,15 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ status, small = false }) => {
   const getStatusColor = () => {
     switch (normalized) {
       case 'AVAILABLE':
-      case 'CONFIRMED':
-      case 'BOOKED':
       case 'CHECKED_OUT':
         return '#10b981'; // green
       case 'PENDING':
-        return '#f59e0b'; // yellow
+      case 'CONFIRMED':
+        return '#f59e0b'; // orange/amber
+      case 'BOOKED':
       case 'OCCUPIED':
       case 'CHECKED_IN':
-        return '#3b82f6'; // blue
+        return '#dc2626'; // red (important/occupied)
       case 'MAINTENANCE':
       case 'CANCELLED':
         return '#ef4444'; // red

@@ -1,0 +1,6 @@
+# See also the repository's root .gitignore.
+node_modules/
+data/
+.env
+service-account*.json
+deploy/salasar.env

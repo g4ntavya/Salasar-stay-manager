@@ -1,11 +1,11 @@
 {
   "expo": {
     "name": "Salasar",
-    "slug": "frontend",
-    "version": "1.0.1",
-    "orientation": "portrait",
+    "slug": "salasar-stay-manager",
+    "version": "1.1.0",
+    "orientation": "default",
     "icon": "./assets/images/icon.png",
-    "scheme": "frontend",
+    "scheme": "salasar",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
@@ -13,6 +13,7 @@
     },
     "android": {
       "package": "com.salasar.staymanager",
+      "versionCode": 31,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000000"
@@ -35,7 +36,20 @@
           "resizeMode": "contain",
           "backgroundColor": "#000000"
         }
-      ]
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 35,
+            "targetSdkVersion": 35,
+            "useLegacyPackaging": false,
+            "ndkVersion": "27.1.12297006"
+          }
+        }
+      ],
+      "expo-font",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
@@ -43,8 +57,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "24827575-c505-49fc-8781-92867924d43f"
+        "projectId": "0add12e4-ffe4-43db-b2dd-3a4e90f16152"
       }
-    }
+    },
+    "owner": "gantavyaaa"
   }
 }

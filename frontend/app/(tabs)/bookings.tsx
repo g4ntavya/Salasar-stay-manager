@@ -8,94 +8,131 @@ import {
   RefreshControl,
   TouchableOpacity,
   ScrollView,
+  Alert,
 } from 'react-native';
+import { exportCsv, exportCsvToDevice } from '../../src/utils/exportCsv';
 import { useRouter } from 'expo-router';
-import { get, ref, query, orderByChild, limitToLast } from 'firebase/database';
-import { rtdb } from '@/lib/firebase';
 import { Booking } from '../../src/types';
+import type { BookingEnriched } from '../../src/utils/rtdbService';
 import BookingItem from '../../src/components/BookingItem';
-import LoadingSpinner from '../../src/components/LoadingSpinner';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
-import { normalizeBookingStatus } from '../../src/utils/rtdbService';
+import { normalizeBookingStatus, checkoutBooking, fetchBookingsEnriched } from '../../src/utils/rtdbService';
 import { getCached, setCached } from '../../src/utils/cache';
+import { useAuth } from '../../src/context/AuthContext';
 
 const BookingsScreen = () => {
   const router = useRouter();
-  const [bookings, setBookings] = useState<Booking[]>([]);
-  const [filteredBookings, setFilteredBookings] = useState<Booking[]>([]);
+  const [bookings, setBookings] = useState<BookingEnriched[]>([]);
+  const [filteredBookings, setFilteredBookings] = useState<BookingEnriched[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedMonth, setSelectedMonth] = useState<string>('recent');
+  const [paymentFilter, setPaymentFilter] = useState<'ALL' | 'CASH' | 'UPI'>('ALL');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const loadedOnce = useRef(false);
   const lastCacheCheck = useRef<number>(0);
+  const isFetchingRef = useRef(false);
+  const { profile } = useAuth();
+
+  const handleCheckoutBooking = async (booking: BookingEnriched) => {
+    Alert.alert(
+      'Confirm Checkout',
+      `Are you sure you want to checkout ${booking.customer?.name || 'this guest'}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Checkout',
+          onPress: async () => {
+            try {
+              await checkoutBooking(booking.id);
+              // Optimistic UI update
+              setBookings(prev => prev.map(b => b.id === booking.id ? { ...b, status: 'CHECKED_OUT' as any } : b));
+              setFilteredBookings(prev => prev.map(b => b.id === booking.id ? { ...b, status: 'CHECKED_OUT' as any } : b));
+              Alert.alert('Success', 'Checked out successfully');
+              fetchBookingsInBackground();
+            } catch (error) {
+              console.error('Error checking out:', error);
+              Alert.alert('Error', 'Failed to checkout');
+            }
+          }
+        }
+      ]
+    );
+  };
 
   // Load data once on mount - Instagram-style (never refetch on focus)
   useEffect(() => {
     let mounted = true;
-    
+
     const loadData = async () => {
       console.log('[Bookings] Loading data...');
       // Try cache first for instant display
-      const cached = await getCached<Booking[]>('bookings:list');
-      console.log('[Bookings] Cache result:', cached ? `${cached.length} items` : 'null');
-      
-      if (cached && cached.length && mounted) {
-        setBookings(cached);
-        setFilteredBookings(cached);
+      const cached = await getCached<BookingEnriched[]>('bookings:list');
+      const list = Array.isArray(cached) ? cached : [];
+      console.log('[Bookings] Cache result:', list.length ? `${list.length} items` : 'null');
+
+      if (list.length > 0 && mounted) {
+        setBookings(list);
+        setFilteredBookings(list);
         setLoading(false);
         loadedOnce.current = true;
-        
-        // Fetch fresh data in background
+
+        // Always fetch fresh data in background to update amounts
         console.log('[Bookings] Fetching fresh data in background...');
         fetchBookingsInBackground();
         return;
       }
-      
+
       // No cache - fetch from database
       console.log('[Bookings] No cache, fetching from database...');
-      setLoading(false); // Don't show full-screen spinner
-      setRefreshing(true); // Show pull-to-refresh indicator instead
+      setLoading(true);
       await fetchBookings();
     };
-    
+
     loadData();
     return () => { mounted = false; };
   }, []);
 
-  // Check cache when tab gains focus (efficient - only when user switches tabs)
+  // Check cache on focus - update if cache has new data, or refetch if cache was invalidated
   useFocusEffect(
     useCallback(() => {
+      // Only check cache if we already have data loaded (don't interfere with initial load)
+      if (!loadedOnce.current) return;
+
       const checkCache = async () => {
-        // Throttle checks to once per second max
+        // Throttle checks to once per 2 seconds max to avoid excessive checks
         const now = Date.now();
-        if (now - lastCacheCheck.current < 1000) return;
+        if (now - lastCacheCheck.current < 2000) return;
         lastCacheCheck.current = now;
-        
-        const cached = await getCached<Booking[]>('bookings:list');
-        
-        // Only refetch if cache is explicitly null AND we had data before (checkout scenario)
-        if (cached === null && bookings.length > 0) {
-          console.log('[Bookings] Cache invalidated (checkout), refetching...');
-          loadedOnce.current = false;
-          setRefreshing(true);
-          await fetchBookings();
-        } else if (cached && cached.length > 0) {
-          // Check if cache is different from current state (background update from new booking)
-          const currentIds = bookings.map(b => b.id).sort().join(',');
-          const cachedIds = cached.map(b => b.id).sort().join(',');
-          
-          if (currentIds !== cachedIds) {
-            console.log('[Bookings] Applying background-updated cache');
-            setBookings(cached);
-            setFilteredBookings(cached);
-          }
+
+        const cached = await getCached<BookingEnriched[]>('bookings:list');
+        const list = Array.isArray(cached) ? cached : [];
+
+        if (list.length > 0) {
+          setBookings(prev => {
+            // Compare lengths first for quick detection of new bookings
+            if (prev.length !== list.length) {
+              setFilteredBookings(list);
+              return list;
+            }
+            const currentStr = JSON.stringify(prev.map(b => ({ id: b.id, s: b.status, amt: b.total_amount || 0 })));
+            const cachedStr = JSON.stringify(list.map(b => ({ id: b.id, s: b.status, amt: b.total_amount || 0 })));
+            if (currentStr !== cachedStr) {
+              setFilteredBookings(list);
+              return list;
+            }
+            return prev;
+          });
+        } else {
+          // Cache was invalidated (e.g., after new booking) — refetch in background
+          console.log('[Bookings] Cache invalidated, fetching fresh data...');
+          fetchBookingsInBackground();
         }
       };
       checkCache();
-    }, [bookings.length])
+    }, [])
   );
 
   useEffect(() => {
@@ -104,226 +141,52 @@ const BookingsScreen = () => {
   }, [searchQuery]);
 
   const fetchBookings = async () => {
+    if (isFetchingRef.current) {
+      console.log('[Bookings] Fetch already in progress, skipping');
+      return;
+    }
+    isFetchingRef.current = true;
     try {
-      let bookingsSnap;
-      try {
-        const bookingsQ = query(ref(rtdb, 'bookings'), orderByChild('createdAt'), limitToLast(200));
-        bookingsSnap = await get(bookingsQ);
-      } catch (err) {
-        console.warn('Bookings ordered fetch failed; falling back to full fetch.', err);
-        bookingsSnap = await get(ref(rtdb, 'bookings'));
-      }
-      
-      // Fetch customers and rooms in parallel for better performance
-      const [customersSnap, roomsSnap] = await Promise.all([
-        get(ref(rtdb, 'customers')),
-        get(ref(rtdb, 'rooms')),
-      ]);
+      const startTime = Date.now();
+      console.log('[Bookings] Fetching bookings...');
 
-      const bookingsVal = bookingsSnap.val() || {};
-      const customersVal = customersSnap.val() || {};
-      const roomsVal = roomsSnap.val() || {};
-
-      // Pre-build room lookup map for O(1) access instead of O(n) for each booking
-      const roomLookup = new Map<string, { key: string; data: any }>();
-      Object.entries(roomsVal).forEach(([key, room]: any) => {
-        const roomNo = room.room_no?.toString();
-        if (roomNo) roomLookup.set(roomNo, { key, data: room });
-      });
-
-      const mapped: Booking[] = Object.entries(bookingsVal).map(([id, value]: any) => {
-        const booking = value as any;
-        const customer = customersVal[booking.customerId];
-        const roomInfo = roomLookup.get(booking.roomNo?.toString());
-        const roomData = roomInfo?.data;
-        const roomKey = roomInfo?.key;
-        
-        const normalizedStatus = normalizeBookingStatus(booking.status);
-        const roomAvailable = roomData?.is_available !== false && !roomData?.current_booking_id;
-
-        const amountVal = customer?.city || customer?.amount || '';
-        const parsedAmount = Number(amountVal) || 0;
-        return {
-          id,
-          customer_id: booking.customerId || '',
-          room_id: roomKey || booking.roomNo || '',
-          check_in: booking.checkInDate,
-          check_out_expected: booking.checkOutDate || booking.checkoutDate,
-          check_out_actual: booking.checkOutActual || booking.checkoutDate,
-          status: normalizedStatus,
-          total_amount: parsedAmount,
-          created_by: '',
-          created_at: booking.createdAt ? new Date(booking.createdAt).toISOString() : '',
-          customer: customer
-            ? {
-                id: booking.customerId,
-                name: customer.name || 'Guest',
-                father_name: customer.father_name || '',
-                address: customer.address || '',
-                city: customer.city || '',
-                mobile: customer.phone || '',
-                member_count: customer.member_count || 0,
-                vehicle_number: customer.vehicle_number || '',
-                id_type: customer.id_type || '',
-                id_number_masked: customer.id_number || '',
-
-                created_at: customer.createdAt ? new Date(customer.createdAt).toISOString() : '',
-              }
-            : undefined,
-          room: roomData
-            ? {
-                id: roomKey || booking.roomNo || '',
-                room_number: roomData.room_no?.toString() || booking.roomNo || '',
-                type: roomData.type || 'Room',
-                capacity: roomData.beds || 1,
-                price_per_night: 0,
-                status: roomAvailable ? 'AVAILABLE' : 'OCCUPIED',
-                current_booking_id: roomData.current_booking_id,
-              }
-            : undefined,
-        };
-      });
-
-      const sorted = mapped.sort((a, b) => (a.created_at > b.created_at ? -1 : 1));
-      // Group by customer so multiple rooms booked by same guest appear in one entry
-      const groupedMap = new Map<string, Booking & { room_numbers: string[] }>();
-      for (const b of sorted) {
-        const groupKey =
-          b.customer_id ||
-          b.customer?.mobile ||
-          b.customer?.name ||
-          b.id;
-        const roomNo = b.room?.room_number || b.room_id?.toString() || '';
-        const existing = groupedMap.get(groupKey);
-        if (existing) {
-          if (roomNo && !existing.room_numbers.includes(roomNo)) existing.room_numbers.push(roomNo);
-          // keep the most recent entry (sorted already), so no other fields change
-        } else {
-          groupedMap.set(groupKey, { ...b, room_numbers: roomNo ? [roomNo] : [] });
-        }
-      }
-      const grouped = Array.from(groupedMap.values());
+      const grouped = await fetchBookingsEnriched(50);
+      console.log('[Bookings] Fetch completed in', Date.now() - startTime, 'ms,', grouped.length, 'grouped');
 
       setBookings(grouped);
       setFilteredBookings(grouped);
-      setCached('bookings:list', grouped);
+      await setCached('bookings:list', grouped);
       loadedOnce.current = true;
     } catch (error) {
       console.error('Error fetching bookings:', error);
-      // Keep existing data if available to avoid empty UI on transient errors.
-      if (!bookings.length && !filteredBookings.length) {
+      if (bookings.length === 0 && filteredBookings.length === 0) {
         alert('Failed to load bookings');
       }
     } finally {
       setLoading(false);
       setRefreshing(false);
+      isFetchingRef.current = false;
     }
   };
 
-  // Background fetch without showing loading indicators
   const fetchBookingsInBackground = async () => {
+    if (isFetchingRef.current) {
+      console.log('[Bookings] Background fetch skipped — fetch in progress');
+      return;
+    }
+    isFetchingRef.current = true;
     try {
-      let bookingsSnap;
-      try {
-        const bookingsQ = query(ref(rtdb, 'bookings'), orderByChild('createdAt'), limitToLast(200));
-        bookingsSnap = await get(bookingsQ);
-      } catch (err) {
-        console.warn('Bookings ordered fetch failed; falling back to full fetch.', err);
-        bookingsSnap = await get(ref(rtdb, 'bookings'));
+      const grouped = await fetchBookingsEnriched(50);
+      if (loadedOnce.current) {
+        setBookings(grouped);
+        setFilteredBookings(grouped);
+        await setCached('bookings:list', grouped);
+        console.log('[Bookings] Background refresh complete');
       }
-      
-      const [customersSnap, roomsSnap] = await Promise.all([
-        get(ref(rtdb, 'customers')),
-        get(ref(rtdb, 'rooms')),
-      ]);
-
-      const bookingsVal = bookingsSnap.val() || {};
-      const customersVal = customersSnap.val() || {};
-      const roomsVal = roomsSnap.val() || {};
-
-      const roomLookup = new Map<string, { key: string; data: any }>();
-      Object.entries(roomsVal).forEach(([key, room]: any) => {
-        const roomNo = room.room_no?.toString();
-        if (roomNo) roomLookup.set(roomNo, { key, data: room });
-      });
-
-      const mapped: Booking[] = Object.entries(bookingsVal).map(([id, value]: any) => {
-        const booking = value as any;
-        const customer = customersVal[booking.customerId];
-        const roomInfo = roomLookup.get(booking.roomNo?.toString());
-        const roomData = roomInfo?.data;
-        const roomKey = roomInfo?.key;
-        
-        const normalizedStatus = normalizeBookingStatus(booking.status);
-        const roomAvailable = roomData?.is_available !== false && !roomData?.current_booking_id;
-
-        const amountVal = customer?.city || customer?.amount || '';
-        const parsedAmount = Number(amountVal) || 0;
-        return {
-          id,
-          customer_id: booking.customerId || '',
-          room_id: roomKey || booking.roomNo || '',
-          check_in: booking.checkInDate,
-          check_out_expected: booking.checkOutDate || booking.checkoutDate,
-          check_out_actual: booking.checkOutActual || booking.checkoutDate,
-          status: normalizedStatus,
-          total_amount: parsedAmount,
-          created_by: '',
-          created_at: booking.createdAt ? new Date(booking.createdAt).toISOString() : '',
-          customer: customer
-            ? {
-                id: booking.customerId,
-                name: customer.name || 'Guest',
-                father_name: customer.father_name || '',
-                address: customer.address || '',
-                city: customer.city || '',
-                mobile: customer.phone || '',
-                member_count: customer.member_count || 0,
-                vehicle_number: customer.vehicle_number || '',
-                id_type: customer.id_type || '',
-                id_number_masked: customer.id_number || '',
-                id_photo_base64: customer.id_image_url || '',
-                created_at: customer.createdAt ? new Date(customer.createdAt).toISOString() : '',
-              }
-            : undefined,
-          room: roomData
-            ? {
-                id: roomKey || booking.roomNo || '',
-                room_number: roomData.room_no?.toString() || booking.roomNo || '',
-                type: roomData.type || 'Room',
-                capacity: roomData.beds || 1,
-                price_per_night: 0,
-                status: roomAvailable ? 'AVAILABLE' : 'OCCUPIED',
-                current_booking_id: roomData.current_booking_id,
-              }
-            : undefined,
-        };
-      });
-
-      const sorted = mapped.sort((a, b) => (a.created_at > b.created_at ? -1 : 1));
-      const groupedMap = new Map<string, Booking & { room_numbers: string[] }>();
-      for (const b of sorted) {
-        const groupKey =
-          b.customer_id ||
-          b.customer?.mobile ||
-          b.customer?.name ||
-          b.id;
-        const roomNo = b.room?.room_number || b.room_id?.toString() || '';
-        const existing = groupedMap.get(groupKey);
-        if (existing) {
-          if (roomNo && !existing.room_numbers.includes(roomNo)) existing.room_numbers.push(roomNo);
-        } else {
-          groupedMap.set(groupKey, { ...b, room_numbers: roomNo ? [roomNo] : [] });
-        }
-      }
-      const grouped = Array.from(groupedMap.values());
-
-      setBookings(grouped);
-      setFilteredBookings(grouped);
-      setCached('bookings:list', grouped);
-      console.log('[Bookings] Background refresh complete');
     } catch (error) {
       console.error('[Bookings] Background refresh failed:', error);
+    } finally {
+      isFetchingRef.current = false;
     }
   };
 
@@ -339,7 +202,7 @@ const BookingsScreen = () => {
     if (value.toDate) {
       try {
         return value.toDate();
-      } catch {}
+      } catch { }
     }
     if (typeof value === 'string') {
       const d = new Date(value);
@@ -349,21 +212,21 @@ const BookingsScreen = () => {
   };
 
   const filterBySearch = useCallback(
-    (list: Booking[]) => {
+    (list: BookingEnriched[]) => {
       if (!debouncedSearch.trim()) return list;
       const query = debouncedSearch.toLowerCase();
       return list.filter(
         (booking) =>
           booking.customer?.name?.toLowerCase().includes(query) ||
           booking.room_numbers?.some((rn) => rn.toLowerCase().includes(query)) ||
-          booking.room?.room_number?.toLowerCase().includes(query)
+          (booking.room?.room_no ?? booking.roomNo)?.toLowerCase().includes(query)
       );
     },
     [debouncedSearch]
   );
 
   const filterByMonth = useCallback(
-    (list: Booking[]) => {
+    (list: BookingEnriched[]) => {
       if (selectedMonth === 'recent') return list;
       const [month, year] = selectedMonth.split('-').map((v) => Number(v));
       return list.filter((booking) => {
@@ -378,11 +241,20 @@ const BookingsScreen = () => {
     [selectedMonth]
   );
 
+  const filterByPaymentMode = useCallback(
+    (list: BookingEnriched[]) => {
+      if (paymentFilter === 'ALL') return list;
+      return list.filter((booking) => booking.payment_mode === paymentFilter);
+    },
+    [paymentFilter]
+  );
+
   useEffect(() => {
-    const base = filterByMonth(bookings);
-    const filtered = filterBySearch(base);
-    setFilteredBookings(filtered);
-  }, [bookings, filterByMonth, filterBySearch]);
+    let result = filterByMonth(bookings);
+    result = filterByPaymentMode(result);
+    result = filterBySearch(result);
+    setFilteredBookings(result);
+  }, [bookings, filterByMonth, filterByPaymentMode, filterBySearch]);
 
   const monthOptions = useMemo(() => {
     const months = new Set<string>();
@@ -402,6 +274,47 @@ const BookingsScreen = () => {
       return yb - ya; // descending year
     });
   }, [bookings]);
+
+  const handleExportCSV = async () => {
+    if (filteredBookings.length === 0) {
+      Alert.alert('No data', 'There are no bookings to export for the current filters.');
+      return;
+    }
+
+    // Build CSV content
+    const header = "Booking ID,Guest Name,Mobile,Rooms,Check-in,Check-out,Status,Amount,Payment,Entered As\n";
+    const q = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+
+    const safeDate = (d: any) => {
+      if (!d) return '';
+      const date = new Date(d);
+      return isNaN(date.getTime()) ? '' : date.toLocaleDateString('en-IN');
+    };
+
+    const rows = filteredBookings.map(b => {
+      const rooms = (b.room_numbers || []).join('; ') || (b as any).room?.room_number || '';
+      const name = b.customer?.name || 'Guest';
+      const phone = b.customer?.mobile || '';
+      const checkIn = safeDate(b.check_in);
+      const checkOut = safeDate(b.check_out_expected);
+      const status = b.status || '';
+      const amt = b.total_amount || 0;
+      const pMode = b.payment_mode || '';
+
+      return `${b.id},${q(name)},${q(phone)},${q(rooms)},${checkIn},${checkOut},${q(status)},${amt},${q(pMode)},${q(b.customer?.amount)}`;
+    }).join('\n');
+
+    console.log(`[Export] Generating CSV for ${filteredBookings.length} bookings`);
+
+    const csvContent = header + rows;
+    const fileName = `Bookings_${selectedMonth.replace(/-/g, '_')}.csv`;
+
+    // Use the new export function
+    await exportCsvToDevice({
+      filename: fileName,
+      csv: csvContent
+    });
+  };
 
   // Don't show full-screen loading spinner - show content with pull-to-refresh instead
   return (
@@ -436,6 +349,31 @@ const BookingsScreen = () => {
             );
           })}
         </ScrollView>
+        <TouchableOpacity style={styles.exportIcon} onPress={() => handleExportCSV()}>
+          <Ionicons name="download-outline" size={24} color="#dc2626" />
+        </TouchableOpacity>
+      </View>
+
+      <View style={[styles.filterRow, { paddingTop: 4, paddingBottom: 10 }]}>
+        <Text style={styles.filterLabel}>Filter by:</Text>
+        <TouchableOpacity
+          style={[styles.miniChip, paymentFilter === 'ALL' && styles.miniChipActive]}
+          onPress={() => setPaymentFilter('ALL')}
+        >
+          <Text style={[styles.miniChipText, paymentFilter === 'ALL' && styles.miniChipTextActive]}>All</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.miniChip, paymentFilter === 'CASH' && styles.miniChipActive]}
+          onPress={() => setPaymentFilter('CASH')}
+        >
+          <Text style={[styles.miniChipText, paymentFilter === 'CASH' && styles.miniChipTextActive]}>Cash</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.miniChip, paymentFilter === 'UPI' && styles.miniChipActive]}
+          onPress={() => setPaymentFilter('UPI')}
+        >
+          <Text style={[styles.miniChipText, paymentFilter === 'UPI' && styles.miniChipTextActive]}>UPI</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Search Bar */}
@@ -454,8 +392,10 @@ const BookingsScreen = () => {
         data={filteredBookings}
         renderItem={({ item }) => (
           <BookingItem
-            booking={item}
+            booking={item as unknown as Booking}
             onPress={() => router.push(`/booking-detail/${item.id}` as any)}
+            onEdit={() => router.push(`/booking-detail/${item.id}` as any)}
+            onCheckout={() => handleCheckoutBooking(item)}
           />
         )}
         keyExtractor={(item) => item.id}
@@ -542,6 +482,37 @@ const styles = StyleSheet.create({
   },
   filterChipTextActive: {
     color: '#fff',
+    fontWeight: '700',
+  },
+  exportIcon: {
+    padding: 6,
+    marginLeft: 8,
+  },
+  filterLabel: {
+    fontSize: 12,
+    color: '#6b7280',
+    fontWeight: '600',
+    marginRight: 4,
+  },
+  miniChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#f3f4f6',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  miniChipActive: {
+    backgroundColor: '#fff',
+    borderColor: '#dc2626',
+  },
+  miniChipText: {
+    fontSize: 12,
+    color: '#6b7280',
+    fontWeight: '500',
+  },
+  miniChipTextActive: {
+    color: '#dc2626',
     fontWeight: '700',
   },
 });

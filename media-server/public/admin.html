@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <title>Salasar Guest Archive</title>
+  <style>
+    :root { --red: #dc2626; --ink: #111827; --muted: #6b7280; --line: #e5e7eb; --bg: #f9fafb; --card: #fff; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); background: var(--bg); }
+    header { background: var(--card); border-bottom: 1px solid var(--line); padding: 12px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    header h1 { font-size: 17px; margin: 0; flex: 1; }
+    main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+    button, .btn { background: var(--red); color: #fff; border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+    button.secondary { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+    button:disabled { opacity: .6; cursor: wait; }
+    input { font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; width: 100%; background: #fff; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+    #login { max-width: 360px; margin: 12vh auto; display: grid; gap: 12px; }
+    #login h2 { margin: 0 0 4px; }
+    .error { color: var(--red); min-height: 1.2em; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .toolbar input { flex: 1; min-width: 200px; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 16px; align-items: start; }
+    @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
+    .list { max-height: 75vh; overflow: auto; padding: 0; }
+    .row { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; }
+    .row:hover, .row.active { background: #fef2f2; }
+    .row .name { font-weight: 600; }
+    .row .meta { color: var(--muted); font-size: 13px; grid-column: 1 / -1; }
+    .tag { font-size: 12px; padding: 1px 8px; border-radius: 99px; background: #f3f4f6; color: var(--muted); align-self: center; }
+    .tag.deleted { background: #fee2e2; color: #991b1b; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; }
+    dt { color: var(--muted); }
+    dd { margin: 0; word-break: break-word; }
+    .photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-top: 12px; }
+    .photos img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); cursor: zoom-in; background: #f3f4f6; }
+    .stay { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
+    .muted { color: var(--muted); }
+    #viewer { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none; align-items: center; justify-content: center; padding: 16px; }
+    #viewer img { max-width: 100%; max-height: 100%; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Salasar Guest Archive</h1>
+    <span id="who" class="muted"></span>
+    <button id="logout" class="secondary" hidden>Sign out</button>
+  </header>
+
+  <main>
+    <form id="login" class="card" hidden>
+      <h2>Sign in</h2>
+      <p class="muted" style="margin:0">Use an ADMIN account from the Salasar app.</p>
+      <input id="email" type="email" placeholder="Email" autocomplete="username" required />
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password" required />
+      <button id="loginBtn" type="submit">Sign in</button>
+      <div id="loginError" class="error"></div>
+    </form>
+
+    <section id="app" hidden>
+      <div class="toolbar">
+        <input id="search" type="search" placeholder="Search name, mobile or room…" />
+        <button id="csv" class="secondary">Download CSV</button>
+        <button id="all" class="secondary">Download everything (ZIP)</button>
+      </div>
+      <div class="layout">
+        <div class="card list" id="list"></div>
+        <div class="card" id="detail"><p class="muted">Select a guest to see their details and ID photos.</p></div>
+      </div>
+      <div id="appError" class="error"></div>
+    </section>
+  </main>
+
+  <div id="viewer"><img alt="ID photo" /></div>
+
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
+    import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
+
+    const auth = getAuth(initializeApp(__FIREBASE_CONFIG__));
+    const $ = id => document.getElementById(id);
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+    const rupees = n => '₹' + Number(n || 0).toLocaleString('en-IN');
+    const fmtDay = d => (d ? new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '-');
+    let blobUrls = [];
+
+    const api = async (path, as = 'json') => {
+      const token = await auth.currentUser.getIdToken();
+      const res = await fetch(path, { headers: { Authorization: 'Bearer ' + token } });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || 'Request failed (' + res.status + ')');
+      }
+      return as === 'json' ? res.json() : res.blob();
+    };
+
+    const download = async (path, filename, button) => {
+      const label = button.textContent;
+      button.disabled = true;
+      button.textContent = 'Preparing…';
+      try {
+        const blob = await api(path, 'blob');
+        const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: filename });
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      } catch (e) {
+        $('appError').textContent = e.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    };
+
+    const loadList = async () => {
+      try {
+        const q = encodeURIComponent($('search').value.trim());
+        const { total, guests } = await api('/v1/admin/guests?q=' + q);
+        $('list').innerHTML = guests.length
+          ? guests.map(g => `
+              <div class="row" data-id="${esc(g.id)}">
+                <span class="name">${esc(g.name)}</span>
+                <span class="tag ${g.deleted ? 'deleted' : ''}">${g.deleted ? 'deleted in app' : esc(g.status || '')}</span>
+                <span class="meta">${fmtDay(g.checkInDay)} · ${esc(g.mobile || 'no mobile')} · Room ${esc(g.rooms.join(', ') || '-')} · ${rupees(g.total)} · ${g.photos} photo(s)</span>
+              </div>`).join('') + (total > guests.length ? `<p class="muted" style="padding:10px 14px">Showing ${guests.length} of ${total}. Search to narrow down.</p>` : '')
+          : '<p class="muted" style="padding:14px">No guests found.</p>';
+      } catch (e) {
+        $('appError').textContent = e.message;
+      }
+    };
+
+    const showGuest = async id => {
+      document.querySelectorAll('.row').forEach(r => r.classList.toggle('active', r.dataset.id === id));
+      blobUrls.forEach(URL.revokeObjectURL);
+      blobUrls = [];
+      $('detail').innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        const g = await api('/v1/admin/guests/' + encodeURIComponent(id));
+        const c = g.customer || {};
+        const row = (k, v) => `<dt>${k}</dt><dd>${esc(v || '-')}</dd>`;
+        $('detail').innerHTML = `
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:start">
+            <h2 style="margin:0 0 12px">${esc(c.name || 'Guest')}</h2>
+            <button id="zipOne" class="secondary">Download folder</button>
+          </div>
+          ${g.deleted ? '<p class="error">This guest was deleted in the app. Kept here as an archive.</p>' : ''}
+          <dl>
+            ${row('Mobile', c.mobile)}${row("Father's name", c.father_name)}${row('Address', [c.address, c.city].filter(Boolean).join(', '))}
+            ${row('Members', c.membersCount)}${row('Vehicle', c.vehicleNumber)}${row('ID proof', [c.id_type, c.id_number].filter(Boolean).join(' '))}
+            ${row('Purpose', c.purpose)}
+          </dl>
+          ${(g.stays || []).map(s => `
+            <div class="stay">
+              <strong>Room ${esc(s.rooms.join(', ') || '-')}</strong> · ${fmtDay(s.checkInDay)} → ${fmtDay(s.checkOutDay)} · ${esc(s.status)}<br/>
+              <span class="muted">Entered "${esc(s.amountRaw || '-')}" = ${rupees(s.total)} (Cash ${rupees(s.cash)}, UPI ${rupees(s.upi)})</span>
+            </div>`).join('')}
+          <div class="photos" id="photos">${g.photoUrls.length ? '' : '<p class="muted">No ID photos uploaded.</p>'}</div>
+          <p class="muted" style="font-size:12px;margin-bottom:0">Folder: ${esc(g.folder)}</p>`;
+        $('zipOne').onclick = e => download(`/v1/admin/guests/${encodeURIComponent(id)}/zip`, (c.name || 'guest') + '.zip', e.currentTarget);
+        for (const url of g.photoUrls) {
+          const img = document.createElement('img');
+          img.alt = 'ID photo';
+          $('photos').appendChild(img);
+          api(url, 'blob').then(blob => {
+            const src = URL.createObjectURL(blob);
+            blobUrls.push(src);
+            img.src = src;
+            img.onclick = () => { $('viewer').querySelector('img').src = src; $('viewer').style.display = 'flex'; };
+          });
+        }
+      } catch (e) {
+        $('detail').innerHTML = `<p class="error">${esc(e.message)}</p>`;
+      }
+    };
+
+    $('list').addEventListener('click', e => { const row = e.target.closest('.row'); if (row) showGuest(row.dataset.id); });
+    let searchTimer;
+    $('search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadList, 250); });
+    $('csv').onclick = e => download('/v1/admin/export.csv', 'salasar-guests.csv', e.currentTarget);
+    $('all').onclick = e => download('/v1/admin/export.zip', `salasar-guests-${new Date().toISOString().slice(0, 10)}.zip`, e.currentTarget);
+    $('viewer').onclick = () => ($('viewer').style.display = 'none');
+    $('logout').onclick = () => signOut(auth);
+
+    $('login').addEventListener('submit', async e => {
+      e.preventDefault();
+      $('loginBtn').disabled = true;
+      $('loginError').textContent = '';
+      try {
+        await signInWithEmailAndPassword(auth, $('email').value.trim(), $('password').value);
+      } catch (err) {
+        $('loginError').textContent = /invalid|wrong|not-found/i.test(err.code || '') ? 'Incorrect email or password.' : err.message;
+      } finally {
+        $('loginBtn').disabled = false;
+      }
+    });
+
+    onAuthStateChanged(auth, async user => {
+      $('login').hidden = !!user;
+      $('app').hidden = !user;
+      $('logout').hidden = !user;
+      $('who').textContent = user ? user.email : '';
+      $('appError').textContent = '';
+      if (user) loadList();
+    });
+  </script>
+</body>
+</html>

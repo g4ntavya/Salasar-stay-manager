@@ -1,4 +1,4 @@
-import { RoomStatus } from '../types';
+import type { RoomStatus } from '../types';
 import { DEFAULT_ROOM_STATUS } from './roomConstants';
 
 type SeedRoom = {
@@ -11,9 +11,10 @@ type SeedRoom = {
   current_booking_id: string | null;
 };
 
-// Rooms removed: 1, 107, 110
+// Rooms removed: 1 (Staff/Disabled Rooms)
 
 const rawRooms: SeedRoom[] = [
+  // { room_no: '1', beds: 2, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '2', beds: 3, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '3', beds: 3, type: 'AC', ac_make: 'LLOYD', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '4', beds: 2, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
@@ -24,8 +25,6 @@ const rawRooms: SeedRoom[] = [
   { room_no: '9', beds: 2, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '10', beds: 3, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '11', beds: 3, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
-  { room_no: '108', beds: 3, type: 'AC', ac_make: '', remarks: 'Re-added', is_available: true, current_booking_id: null },
-  { room_no: '109', beds: 3, type: 'AC', ac_make: '', remarks: 'Re-added', is_available: true, current_booking_id: null },
 
   { room_no: '101', beds: 4, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '102', beds: 3, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
@@ -33,10 +32,14 @@ const rawRooms: SeedRoom[] = [
   { room_no: '104', beds: 2, type: 'Non AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '105', beds: 2, type: 'AC', ac_make: 'LLOYD', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '106', beds: 3, type: 'AC', ac_make: 'LLOYD', remarks: '', is_available: true, current_booking_id: null },
+  { room_no: '107', beds: 2, type: 'AC', ac_make: '', remarks: 'Re-added', is_available: true, current_booking_id: null },
+  { room_no: '108', beds: 3, type: 'AC', ac_make: '', remarks: 'Re-added', is_available: true, current_booking_id: null },
+  { room_no: '109', beds: 3, type: 'AC', ac_make: '', remarks: 'Re-added', is_available: true, current_booking_id: null },
+  { room_no: '110', beds: 2, type: 'AC', ac_make: '', remarks: 'Re-added', is_available: true, current_booking_id: null },
 
   { room_no: '111', beds: 2, type: 'Non AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '112', beds: 2, type: 'AC', ac_make: 'IFB', remarks: '', is_available: true, current_booking_id: null },
-  { room_no: '113', beds: 3, type: 'AC', ac_make: 'OLD', remarks: '', is_available: true, current_booking_id: null },
+  { room_no: '113', beds: 3, type: 'Non AC', ac_make: 'OLD', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '114', beds: 3, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '115', beds: 3, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '116', beds: 4, type: 'AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
@@ -60,9 +63,9 @@ const rawRooms: SeedRoom[] = [
   { room_no: '211', beds: 4, type: 'Non AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
 
   { room_no: '301', beds: 4, type: 'Non AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
-  { room_no: '302', beds: 0, type: 'Non AC Small Hall', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
+  { room_no: '302', beds: 0, type: 'Small Hall Non AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '303', beds: 4, type: 'AC', ac_make: 'LLOYD (NEW)', remarks: '', is_available: true, current_booking_id: null },
-  { room_no: '304', beds: 0, type: 'AC Big Hall', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
+  { room_no: '304', beds: 0, type: 'Hall AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '305', beds: 4, type: 'Non AC', ac_make: '', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '306', beds: 6, type: 'AC', ac_make: 'LLOYD', remarks: '', is_available: true, current_booking_id: null },
   { room_no: '307', beds: 4, type: 'AC', ac_make: 'LLOYD (NEW)', remarks: '', is_available: true, current_booking_id: null },

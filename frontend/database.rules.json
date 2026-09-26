@@ -1,0 +1,153 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "users": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || root.child('users').child(auth.uid).child('role').val() === 'ADMIN')",
+        ".write": false
+      }
+    },
+    "rooms": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'STAFF')",
+      "$roomNo": {
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'STAFF')",
+        "is_available": {
+          ".validate": "newData.isBoolean()"
+        },
+        "current_booking_id": {
+          ".validate": "newData.isString() && newData.val().length <= 40"
+        },
+        "status": {
+          ".validate": "newData.isString() && newData.val().length <= 20"
+        },
+        "cleaned_status": {
+          ".validate": "newData.isString() && newData.val().length <= 20"
+        },
+        "updatedAt": {
+          ".validate": "newData.isNumber()"
+        },
+        "$other": {
+          ".validate": "!newData.isString() || newData.val().length <= 200"
+        }
+      }
+    },
+    "customers": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'STAFF')",
+      "$customerId": {
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'STAFF')",
+        "idImageUrls": {
+          "$index": {
+            ".validate": "newData.isString() && newData.val().beginsWith('http') && newData.val().length <= 500"
+          }
+        },
+        "idImageUrl": {
+          ".validate": "newData.isString() && newData.val().length <= 500"
+        },
+        "createdAt": {
+          ".validate": "newData.isNumber()"
+        },
+        "updatedAt": {
+          ".validate": "newData.isNumber()"
+        },
+        "$other": {
+          ".validate": "!newData.isString() || newData.val().length <= 1000"
+        }
+      },
+      ".indexOn": [
+        "updatedAt"
+      ]
+    },
+    "customerIndex": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'STAFF')",
+      ".indexOn": [
+        "u"
+      ],
+      "$customerId": {
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'STAFF')",
+        ".validate": "newData.child('u').isNumber()"
+      }
+    },
+    "bookings": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'STAFF')",
+      ".indexOn": [
+        "customerId",
+        "stayId",
+        "checkInDay",
+        "checkOutDay",
+        "checkedOutDay",
+        "status",
+        "updatedAt"
+      ],
+      "$bookingId": {
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'ADMIN' || root.child('users').child(auth.uid).child('role').val() === 'STAFF')",
+        ".validate": "newData.hasChildren(['customerId', 'roomNo', 'status', 'checkInDay', 'checkOutDay'])",
+        "status": {
+          ".validate": "newData.val() === 'BOOKED' || newData.val() === 'CONFIRMED' || newData.val() === 'CHECKED_OUT' || newData.val() === 'CANCELLED'"
+        },
+        "checkInDay": {
+          ".validate": "newData.isString() && newData.val().matches(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/)"
+        },
+        "checkOutDay": {
+          ".validate": "newData.isString() && newData.val().matches(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/)"
+        },
+        "checkedOutDay": {
+          ".validate": "newData.isString() && newData.val().matches(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/)"
+        },
+        "totalAmount": {
+          ".validate": "newData.isNumber() && newData.val() >= 0"
+        },
+        "tokenAmount": {
+          ".validate": "newData.isNumber() && newData.val() >= 0"
+        },
+        "payments": {
+          "cash": {
+            ".validate": "newData.isNumber() && newData.val() >= 0"
+          },
+          "upi": {
+            ".validate": "newData.isNumber() && newData.val() >= 0"
+          },
+          "$other": {
+            ".validate": false
+          }
+        },
+        "revenueCounted": {
+          ".validate": "newData.isBoolean()"
+        },
+        "$other": {
+          ".validate": "!newData.isString() || newData.val().length <= 500"
+        }
+      }
+    },
+    "stats": {
+      ".read": "auth != null && root.child('users').child(auth.uid).child('role').exists()",
+      ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'ADMIN'",
+      "monthly": {
+        "$month": {
+          ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'STAFF'",
+          ".validate": "$month.matches(/^[0-9]{4}-[0-9]{2}$/)"
+        }
+      },
+      "daily": {
+        "$day": {
+          ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'STAFF'",
+          ".validate": "$day.matches(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/)"
+        }
+      }
+    },
+    "config": {
+      ".read": "auth != null && root.child('users').child(auth.uid).child('role').exists()",
+      ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'ADMIN'",
+      "mediaUrl": {
+        ".validate": "newData.isString() && newData.val().beginsWith('https://') && newData.val().length <= 200"
+      }
+    },
+    "changelog": {
+      ".read": "auth != null",
+      ".indexOn": [
+        "createdAt"
+      ],
+      ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() === 'ADMIN'"
+    }
+  }
+}
