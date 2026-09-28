@@ -6,7 +6,6 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import Animated, {
   FadeIn,
   FadeInDown,
-  FadeOut,
   useAnimatedProps,
   useAnimatedStyle,
   useSharedValue,
@@ -390,7 +389,7 @@ const NewBookingScreen: React.FC = () => {
         </View>
 
         {!keyboardOpen ? (
-          <Animated.View entering={FadeInDown.duration(motion.base).easing(motion.ease)} exiting={FadeOut.duration(motion.fast)} style={styles.footer}>
+          <Animated.View entering={FadeInDown.duration(motion.base).easing(motion.ease)} style={styles.footer}>
             {step === 0 ? (
               <>
                 <View style={{ flex: 1 }}>

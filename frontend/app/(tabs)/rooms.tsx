@@ -331,6 +331,9 @@ const RoomsScreen = () => {
     <SafeAreaView style={styles.container} edges={['top']}>
       {viewMode === 'rooms' ? (
         <FlatList
+        // Android's offscreen-row clipping can re-add a view that still has a parent and crash
+        // the app (seen right after sign-in, when the list fills for the first time).
+        removeClippedSubviews={false}
           key="rooms"
           data={visibleRooms}
           renderItem={renderRoom}
@@ -345,6 +348,9 @@ const RoomsScreen = () => {
         />
       ) : (
         <FlatList
+        // Android's offscreen-row clipping can re-add a view that still has a parent and crash
+        // the app (seen right after sign-in, when the list fills for the first time).
+        removeClippedSubviews={false}
           key="advance"
           data={advanceBookings}
           renderItem={renderAdvance}
@@ -404,6 +410,8 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     borderWidth: 1,
     borderColor: colors.line,
+    // Always has a background: on Android one added later is drawn without the rounded corners.
+    backgroundColor: colors.surface,
   },
   advCard: { flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md },
   advDate: { width: 58, alignItems: 'center', paddingVertical: space.sm, borderRadius: radius.md, backgroundColor: colors.goldSoft },

@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect } from 'react';
+import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -7,6 +8,7 @@ import type { BottomTabBarProps } from 'expo-router/js-tabs';
 import { colors, radius, shadows, space } from '../theme';
 import { AppText } from './Text';
 import { PressableScale, haptic } from './Pressable';
+import { motion } from './motion';
 
 type IconName = keyof typeof Ionicons.glyphMap;
 
@@ -37,6 +39,23 @@ export const useTabBarSpace = () => {
   return BAR_HEIGHT + barGap(insets.bottom) + space.xxl;
 };
 
+/**
+ * The pill behind the selected tab's icon. It is always mounted with its colour and rounded
+ * corners and only fades in and out: on Android, a background added to a view after it first
+ * renders is drawn without its corner radius, which made the pill turn square after a tap.
+ */
+const ActivePill: React.FC<{ active: boolean }> = ({ active }) => {
+  const shown = useSharedValue(active ? 1 : 0);
+  useEffect(() => {
+    shown.set(withTiming(active ? 1 : 0, { duration: motion.base, easing: motion.ease }));
+  }, [active, shown]);
+  const style = useAnimatedStyle(() => ({
+    opacity: shown.get(),
+    transform: [{ scaleX: 0.6 + shown.get() * 0.4 }],
+  }));
+  return <Animated.View pointerEvents="none" style={[styles.pill, style]} />;
+};
+
 /** Floating tab bar with an optional raised centre action. */
 export const AppTabBar: React.FC<AppTabBarProps> = ({ state, navigation, tabs, centerAction }) => {
   const insets = useSafeAreaInsets();
@@ -62,7 +81,8 @@ export const AppTabBar: React.FC<AppTabBarProps> = ({ state, navigation, tabs, c
         }}
         style={styles.item}
       >
-        <View style={[styles.iconWrap, focused && styles.iconWrapOn]}>
+        <View style={styles.iconWrap}>
+          <ActivePill active={focused} />
           <Ionicons name={focused ? tab.iconActive : tab.icon} size={21} color={focused ? colors.brand : colors.inkMuted} />
         </View>
         <AppText variant="caption" color={focused ? colors.brand : colors.inkMuted} style={styles.label} numberOfLines={1}>
@@ -123,7 +143,7 @@ const styles = StyleSheet.create({
   },
   item: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 2 },
   iconWrap: { width: 44, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
-  iconWrapOn: { backgroundColor: colors.brandSoft },
+  pill: { ...StyleSheet.absoluteFill, borderRadius: 15, backgroundColor: colors.brandSoft },
   label: { fontSize: 11 },
   center: {
     width: 56,

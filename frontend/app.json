@@ -2,7 +2,7 @@
   "expo": {
     "name": "Salasar",
     "slug": "salasar-stay-manager",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "salasar",
@@ -12,7 +12,7 @@
     },
     "android": {
       "package": "com.salasar.staymanager",
-      "versionCode": 32,
+      "versionCode": 33,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000000"

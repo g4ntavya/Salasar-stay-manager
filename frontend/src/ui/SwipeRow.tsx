@@ -126,6 +126,7 @@ export const SwipeRow: React.FC<SwipeRowProps> = ({ children, primary, secondary
         {secondary ? (
           <View style={styles.secondary}>
             <Pressable
+              focusable={false}
               onPress={() => {
                 haptic.press();
                 close();
@@ -145,6 +146,7 @@ export const SwipeRow: React.FC<SwipeRowProps> = ({ children, primary, secondary
           </View>
         ) : null}
         <Pressable
+          focusable={false}
           onPress={() => {
             haptic.press();
             runPrimary();

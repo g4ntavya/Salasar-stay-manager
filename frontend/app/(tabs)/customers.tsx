@@ -244,6 +244,9 @@ const CustomersScreen = () => {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <SectionList
+        // Android's offscreen-row clipping can re-add a view that still has a parent and crash
+        // the app (seen right after sign-in, when the list fills for the first time).
+        removeClippedSubviews={false}
         sections={loading && guests.length === 0 ? [] : sections}
         renderItem={renderGuest}
         renderSectionHeader={({ section }) =>

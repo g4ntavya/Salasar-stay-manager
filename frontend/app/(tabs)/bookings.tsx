@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, FlatList, RefreshControl, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import Animated, { FadeInDown, FadeOut, LinearTransition } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import {
   Chip,
@@ -15,7 +14,6 @@ import {
   Segmented,
   SkeletonList,
   colors,
-  motion,
   space,
   GUTTER,
   useTabBarSpace,
@@ -261,24 +259,23 @@ const BookingsScreen = () => {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <Animated.FlatList
+      {/* No mount/unmount (layout) animations in this list: on Android they crash when the
+          list swaps from its loading state to live rows. The new-stay highlight is a plain style animation. */}
+      <FlatList
+        // Android's offscreen-row clipping can re-add a view that still has a parent and crash
+        // the app (seen right after sign-in, when the list fills for the first time).
+        removeClippedSubviews={false}
         ref={listRef}
         data={loading && bookings.length === 0 ? [] : visible}
         keyExtractor={item => item.id}
-        itemLayoutAnimation={LinearTransition.duration(motion.base).easing(motion.ease)}
         renderItem={({ item }) => (
-          <Animated.View
-            entering={item.id === highlightId ? FadeInDown.springify().damping(18).stiffness(160) : undefined}
-            exiting={FadeOut.duration(motion.fast)}
-          >
-            <BookingItem
-              booking={item as unknown as Booking}
-              highlight={item.id === highlightId}
-              onPress={() => router.push(`/booking-detail/${item.id}`)}
-              onEdit={() => router.push(`/edit-booking/${item.id}`)}
-              onCheckout={() => checkout(item)}
-            />
-          </Animated.View>
+          <BookingItem
+            booking={item as unknown as Booking}
+            highlight={item.id === highlightId}
+            onPress={() => router.push(`/booking-detail/${item.id}`)}
+            onEdit={() => router.push(`/edit-booking/${item.id}`)}
+            onCheckout={() => checkout(item)}
+          />
         )}
         ListHeaderComponent={header}
         contentContainerStyle={[styles.listContent, { paddingBottom: bottomSpace }]}

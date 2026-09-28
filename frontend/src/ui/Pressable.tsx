@@ -40,6 +40,10 @@ export const PressableScale: React.FC<PressableScaleProps> = ({
 
   return (
     <Pressable
+      // Android draws a square grey box around the keyboard-focused view once any key event
+      // (even the 3-button nav's Back) takes it out of touch mode. Touch apps don't need it;
+      // TalkBack uses its own accessibility focus and still works.
+      focusable={Platform.OS === 'android' ? false : rest.focusable}
       {...rest}
       style={outer}
       disabled={disabled}

@@ -86,6 +86,7 @@ export function Segmented<T extends string>({ options, value, onChange, style }:
         return (
           <Pressable
             key={o.value}
+            focusable={Platform.OS !== 'android'}
             onPress={() => {
               if (!active) haptic.tap();
               onChange(o.value);
