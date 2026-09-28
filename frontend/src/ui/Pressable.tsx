@@ -60,7 +60,8 @@ export const PressableScale: React.FC<PressableScaleProps> = ({
         onPress?.(e);
       }}
     >
-      <Animated.View style={[inner, Platform.OS === 'android' && styles.noElevation, scaleStyle, disabled && { opacity: 0.5 }]}>
+      {/* Always a real native view, so toggling `disabled` never re-parents its children (see Button). */}
+      <Animated.View collapsable={false} style={[inner, Platform.OS === 'android' && styles.noElevation, scaleStyle, disabled && { opacity: 0.5 }]}>
         {children}
       </Animated.View>
     </Pressable>

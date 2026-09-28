@@ -70,8 +70,12 @@ export const Button: React.FC<ButtonProps> = ({
         style,
       ]}
     >
-      {/* The label stays in place (invisible) while loading so the button keeps its width. */}
-      <View style={[styles.row, loading && { opacity: 0 }]}>
+      {/* The label stays in place (invisible) while loading so the button keeps its width.
+          collapsable={false} keeps this row a real native view at all times. Otherwise React Native
+          only creates it while loading (opacity 0) and removes it afterwards, moving the label between
+          parents; on Android that move could run in the wrong order and crash the app
+          ("The specified child already has a parent"), e.g. right after signing in. */}
+      <View collapsable={false} style={[styles.row, loading && { opacity: 0 }]}>
         {icon && <Ionicons name={icon} size={iconSize} color={p.fg} />}
         <AppText variant={size === 'sm' ? 'caption' : 'bodyStrong'} color={p.fg} numberOfLines={1}>
           {title}
