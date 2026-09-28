@@ -1,27 +1,48 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, Modal, ActivityIndicator } from 'react-native';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { View, StyleSheet, Alert, ScrollView, Modal, Linking, Pressable, Platform } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useFocusEffect, useRouter, useLocalSearchParams } from 'expo-router';
+import { checkOutStay } from '../../src/utils/checkoutFlow';
 import LoadingSpinner from '../../src/components/LoadingSpinner';
 import {
   fetchBookingById,
-  handleCheckout as rtdbHandleCheckout,
-  BookingDetail,
-  RtdbRoom,
   reassignBookingRooms,
-  subscribeToRooms,
   confirmCheckIn,
   extendStay,
+  type BookingDetail,
+  type RtdbRoom,
 } from '../../src/utils/rtdbService';
-import { defaultRoomSeeds } from '../../src/utils/defaultRooms';
-import { TOTAL_ROOMS } from '../../src/utils/roomConstants';
-import { compareRoomIds } from '../../src/utils/rtdbService';
-import { getCached, setCached, getCachedItemSync } from '../../src/utils/cache';
+import { getCached, getCachedItemSync } from '../../src/utils/cache';
+import { useRoomAvailability } from '../../src/utils/useRoomAvailability';
+import { RoomPicker } from '../../src/components/RoomPicker';
 import { mediaImageSource } from '../../src/utils/imageStorage';
 import { localDay } from '../../src/utils/date';
 import { Ionicons } from '@expo/vector-icons';
-import DateTimePicker from '@react-native-community/datetimepicker';
-import { validateExtendStay } from '../../src/utils/bookingUtils';
+import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
+import { parseAmount } from '../../src/utils/amount';
+import {
+  AppText,
+  Avatar,
+  Button,
+  Card,
+  EmptyState,
+  IconButton,
+  InfoRow,
+  NavBar,
+  PressableScale,
+  SelectField,
+  Sheet,
+  SlideToConfirm,
+  StatusPill,
+  colors,
+  formatRupees,
+  haptic,
+  radius,
+  space,
+  statusColors,
+  GUTTER,
+} from '../../src/ui';
 
 // Helper to convert cached booking format to BookingDetail
 const cachedToBookingDetail = (cached: any): BookingDetail | null => {
@@ -61,8 +82,7 @@ const BookingDetailScreen = () => {
 
   const [booking, setBooking] = useState<BookingDetail | null>(initialBooking);
   const [loading, setLoading] = useState(false);
-  const [checkingOut, setCheckingOut] = useState(false);
-  const [rooms, setRooms] = useState<RtdbRoom[]>([]);
+  const [missing, setMissing] = useState(false);
   const [editRoomsVisible, setEditRoomsVisible] = useState(false);
   const [roomSelection, setRoomSelection] = useState<Set<string>>(new Set());
   const [savingRooms, setSavingRooms] = useState(false);
@@ -70,7 +90,6 @@ const BookingDetailScreen = () => {
 
   // Extend Stay State
   const [showExtendModal, setShowExtendModal] = useState(false);
-  const [showDatePicker, setShowDatePicker] = useState(false);
   const [newCheckoutDate, setNewCheckoutDate] = useState(new Date());
   const [extending, setExtending] = useState(false);
 
@@ -80,21 +99,17 @@ const BookingDetailScreen = () => {
     try {
       const newOut = localDay(newCheckoutDate);
 
-      // Validation (simplified for now, ideally fetch all future bookings)
-      const validation = validateExtendStay(booking as any, newOut, []);
-      if (!validation.valid) {
-        Alert.alert('Validation Error', validation.error);
+      if (newOut <= localDay(booking.checkOutDate)) {
+        Alert.alert('Pick a later date', 'To shorten the stay, use Edit instead.');
         return;
       }
-
       await extendStay(id, newOut);
-
-      Alert.alert('Success', 'Stay extended successfully');
+      haptic.success();
       setShowExtendModal(false);
       load();
     } catch (error: any) {
       console.error('Extend stay error', error);
-      Alert.alert('Error', error?.message || 'Failed to extend stay');
+      Alert.alert('Could not extend', error?.message || 'Check your connection and try again.');
     } finally {
       setExtending(false);
     }
@@ -116,7 +131,7 @@ const BookingDetailScreen = () => {
             setConfirmingCheckIn(true);
             try {
               await confirmCheckIn(id, booking.roomNo);
-              Alert.alert('Success', 'Check-in confirmed successfully');
+              haptic.success();
               load();
             } catch (error: any) {
               console.error('Confirm check-in error', error);
@@ -139,102 +154,65 @@ const BookingDetailScreen = () => {
       const cachedList = await getCached<any[]>('bookings:list');
       if (cachedList && cachedList.length) {
         const cachedBooking = cachedList.find((b: any) => b.id === id);
-        if (cachedBooking) {
-          setBooking(cachedToBookingDetail(cachedBooking));
-          return;
-        }
+        if (cachedBooking) setBooking(prev => prev ?? cachedToBookingDetail(cachedBooking));
       }
-      // Only fetch from database if NOT in cache
-      load();
+      // The focus listener below fetches the live record either way.
     };
 
     loadFromCacheOrFetch();
   }, [id, booking]);
 
+  const hasBooking = useRef(!!initialBooking);
+  useEffect(() => {
+    hasBooking.current = !!booking;
+  }, [booking]);
   const load = useCallback(async () => {
     if (!id) return;
-    setLoading(true);
+    // Refreshes quietly when something is already on screen (e.g. back from Edit).
+    if (!hasBooking.current) setLoading(true);
     try {
       const data = await fetchBookingById(id);
-      setBooking(data);
+      if (data) setBooking(data);
+      else if (!hasBooking.current) setMissing(true);
     } catch (error) {
       console.error('Error loading booking', error);
-      Alert.alert('Error', 'Failed to load booking');
+      if (!hasBooking.current) Alert.alert('Could not load this stay', 'Check your connection and try again.');
     } finally {
       setLoading(false);
     }
   }, [id]);
 
-  useEffect(() => {
-    // Merge live rooms with seeded defaults so the modal always shows the full list.
-    const mergeWithSeeds = (live: RtdbRoom[]) => {
-      const seedMap = new Map<string, RtdbRoom>();
-      defaultRoomSeeds.slice(0, TOTAL_ROOMS).forEach((seed) => {
-        seedMap.set(seed.room_number, {
-          key: seed.room_number,
-          room_no: seed.room_number,
-          beds: seed.capacity ?? 1,
-          type: seed.type,
-          ac_make: seed.ac_make,
-          remarks: seed.remarks,
-          is_available: seed.status ? seed.status === 'AVAILABLE' : true,
-          current_booking_id: seed.current_booking_id ?? null,
-        });
-      });
-      live.forEach((room) => {
-        seedMap.set(room.room_no, {
-          ...room,
-          is_available: room.is_available !== false,
-        });
-      });
-      return Array.from(seedMap.values()).sort((a, b) => compareRoomIds(a.room_no, b.room_no));
-    };
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load])
+  );
 
-    const unsubscribe = subscribeToRooms(
-      (data) => setRooms(mergeWithSeeds(data)),
-      (err) => console.error('Rooms subscription error', err)
-    );
-    return () => unsubscribe();
-  }, []);
+  // Rooms for the "Change rooms" sheet, judged against this stay's own dates.
+  const { rooms, unavailable } = useRoomAvailability(
+    booking ? localDay(booking.checkInDate) : '',
+    booking ? localDay(booking.checkOutDate) : '',
+    booking?.relatedBookingIds || (booking ? [booking.id] : [])
+  );
 
-  useEffect(() => {
-    if (!booking) return;
-    const initial = booking.roomNumbers && booking.roomNumbers.length > 0
-      ? booking.roomNumbers
-      : [booking.roomNo];
-    setRoomSelection(new Set(initial.map((n) => n?.toString()).filter((n) => n)));
-  }, [booking]);
-
-  const handleCheckout = async () => {
-    if (!id) return;
-    setCheckingOut(true);
-    try {
-      await rtdbHandleCheckout(id);
-
-      // Update local state immediately for instant UI feedback
-      setBooking((prev) => prev ? { ...prev, status: 'CHECKED_OUT' } : prev);
-
-      // Update the booking in cache (don't invalidate - update the status)
-      const cachedBookings = await getCached<any[]>('bookings:list');
-      if (cachedBookings) {
-        const updatedBookings = cachedBookings.map(b =>
-          b.id === id ? { ...b, status: 'CHECKED_OUT' } : b
-        );
-        await setCached('bookings:list', updatedBookings);
-      }
-
-      // Dashboard and room grid update themselves from their live listeners.
-
-      Alert.alert('Checked out', 'Booking checked out and room is now available.');
-      // Navigate back to dashboard
-      router.push('/(tabs)/dashboard' as any);
-    } catch (error: any) {
-      console.error('Checkout error', error);
-      Alert.alert('Error', error?.message || 'Failed to check out');
-    } finally {
-      setCheckingOut(false);
-    }
+  const handleCheckout = async (): Promise<boolean> => {
+    if (!id || !booking) return false;
+    const ok = await checkOutStay(id, { name: booking.customer?.name, rooms: booking.roomNumbers }, { confirm: false });
+    if (!ok) return false;
+    setBooking(prev => (prev ? { ...prev, status: 'CHECKED_OUT', checkOutActual: new Date().toISOString() } : prev));
+    // Let the tick register before leaving.
+    setTimeout(() => (router.canGoBack() ? router.back() : router.replace('/dashboard')), 700);
+    return true;
   };
+
+  if (missing && !booking) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top']}>
+        <NavBar title="Stay" />
+        <EmptyState icon="document-outline" title="Stay not found" message="It may have been deleted on another phone." />
+      </SafeAreaView>
+    );
+  }
 
   if (loading || !booking) {
     return <LoadingSpinner message="Loading booking..." />;
@@ -243,35 +221,21 @@ const BookingDetailScreen = () => {
   const isBooked = booking.status === 'BOOKED';
   const isConfirmed = booking.status === 'CONFIRMED';
   const isActive = isBooked || isConfirmed;
+  const arrivesLater = isActive && localDay(booking.checkInDate) > localDay();
+  const inHouse = isBooked && !arrivesLater;
 
-  const roomsLabel =
-    booking.roomNumbers && booking.roomNumbers.length > 0
-      ? booking.roomNumbers.join(', ')
-      : booking.roomNo;
-  const relatedBookingIds = booking.relatedBookingIds || [booking.id];
-
-  const isRoomUnavailable = (room: RtdbRoom) => {
-    const heldByOther =
-      room.current_booking_id && !relatedBookingIds.includes(room.current_booking_id);
-    const heldByUs =
-      room.current_booking_id && relatedBookingIds.includes(room.current_booking_id);
-    // Only block selection if another booking holds it. If it's ours, allow toggling even if RTDB marks unavailable.
-    if (heldByOther) return true;
-    if (room.is_available === false && !heldByUs) return true;
-    return false;
+  const openRooms = () => {
+    setRoomSelection(new Set(roomList));
+    setEditRoomsVisible(true);
   };
 
-  const toggleRoomSelection = (roomNo: string) => {
-    setRoomSelection((prev) => {
+  const toggleRoomSelection = (room: RtdbRoom) =>
+    setRoomSelection(prev => {
       const next = new Set(prev);
-      if (next.has(roomNo)) {
-        next.delete(roomNo);
-      } else {
-        next.add(roomNo);
-      }
+      if (next.has(room.room_no)) next.delete(room.room_no);
+      else next.add(room.room_no);
       return next;
     });
-  };
 
   const handleSaveRooms = async () => {
     if (!id) return;
@@ -282,7 +246,7 @@ const BookingDetailScreen = () => {
     setSavingRooms(true);
     try {
       await reassignBookingRooms(id, Array.from(roomSelection.values()));
-      Alert.alert('Updated', 'Room allocation updated successfully.');
+      haptic.success();
       setEditRoomsVisible(false);
       load();
     } catch (error: any) {
@@ -293,452 +257,286 @@ const BookingDetailScreen = () => {
     }
   };
 
+
+  const openEdit = () => router.push(`/edit-booking/${booking.id}` as any);
+
+  const nights = (() => {
+    const a = new Date(booking.checkInDate);
+    const b = new Date(booking.checkOutActual || booking.checkOutDate);
+    if (isNaN(a.getTime()) || isNaN(b.getTime())) return null;
+    const noon = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12).getTime();
+    return Math.max(1, Math.round((noon(b) - noon(a)) / 86400000));
+  })();
+  const amount = parseAmount(booking.customer?.amount, 'CASH');
+  const pill = arrivesLater
+    ? { tone: 'reserved' as const, label: `Arrives ${formatShort(booking.checkInDate)}` }
+    : inHouse
+      ? { tone: 'occupied' as const, label: 'In house' }
+      : isConfirmed
+        ? { tone: 'reserved' as const, label: 'Arriving' }
+        : { tone: 'checkedOut' as const, label: 'Checked out' };
+  const idPhotos = (booking.customer?.idImageUrls || []).filter(u => typeof u === 'string' && (u.startsWith('http') || u.startsWith('file://')));
+  const roomList = booking.roomNumbers?.length ? booking.roomNumbers : [booking.roomNo].filter(Boolean);
+
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Booking Detail</Text>
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Guest</Text>
-        <TouchableOpacity
-          onPress={() => booking.customerId && router.push(`/customer-detail/${booking.customerId}` as any)}
-          style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}
-        >
-          <View style={{ flex: 1 }}>
-            <InfoRow label="Name" value={booking.customer?.name || 'Guest'} />
-            <InfoRow label="Mobile" value={booking.customer?.mobile || '-'} />
-            <InfoRow label="Amount" value={booking.customer?.amount || '-'} />
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <NavBar
+        title="Stay"
+        subtitle={roomList.length ? `Room ${roomList.join(', ')}` : undefined}
+        right={isActive ? <IconButton icon="create-outline" onPress={openEdit} accessibilityLabel="Edit stay" /> : undefined}
+      />
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        {/* Guest summary */}
+        <Card style={styles.hero}>
+          <View style={styles.heroTop}>
+            <Avatar name={booking.customer?.name} size={60} />
+            <View style={{ flex: 1 }}>
+              <AppText variant="title2" numberOfLines={2}>
+                {booking.customer?.name || 'Guest'}
+              </AppText>
+              <View style={{ marginTop: space.xs }}>
+                <StatusPill tone={pill.tone} label={pill.label} size="sm" />
+              </View>
+            </View>
+            {booking.customer?.mobile ? (
+              <IconButton icon="call" variant="tonal" accessibilityLabel={`Call ${booking.customer.mobile}`} onPress={() => Linking.openURL(`tel:${booking.customer?.mobile}`)} />
+            ) : null}
           </View>
-          <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
-        </TouchableOpacity>
+          <View style={styles.stats}>
+            {[
+              { label: roomList.length > 1 ? 'Rooms' : 'Room', value: roomList.join(', ') || '—' },
+              { label: 'Nights', value: nights ? String(nights) : '—' },
+              { label: 'Amount', value: amount.total > 0 ? formatRupees(amount.total) : '—' },
+            ].map((stat, i) => (
+              <View key={stat.label} style={[styles.stat, i > 0 && styles.statLine]}>
+                <AppText variant="caption" tone="muted">
+                  {stat.label}
+                </AppText>
+                <AppText variant="numberSm" numberOfLines={1} style={{ fontSize: stat.value.length > 7 ? 17 : 22 }}>
+                  {stat.value}
+                </AppText>
+              </View>
+            ))}
+          </View>
+        </Card>
 
-        {/* ID Proof Thumbnails */}
-        {(() => {
-          const urls = (booking.customer?.idImageUrls || []).filter(u =>
-            typeof u === 'string' && u.length > 0 &&
-            (u.startsWith('http') || u.startsWith('file://'))
-          );
-          if (urls.length === 0) return null;
-          return (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 12 }}>
-              {urls.map((url, idx) => (
-                <TouchableOpacity
-                  key={`${url}-${idx}`}
-                  onPress={() => setSelectedImage(url)}
-                  style={{ marginRight: 8, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#e5e7eb' }}
-                >
-                  <Image
-                    source={mediaImageSource(url)}
-                    style={{ width: 80, height: 80 }}
-                    contentFit="cover"
-                    placeholder={require('../../assets/images/icon.png')} // Fallback placeholder
-                  />
-                </TouchableOpacity>
+        {/* Stay timeline */}
+        <Card style={styles.card}>
+          <AppText variant="overline" tone="muted" style={{ marginBottom: space.md }}>
+            Stay
+          </AppText>
+          <View style={styles.timeline}>
+            <View style={styles.dot} />
+            <View style={{ flex: 1 }}>
+              <AppText variant="caption" tone="muted">
+                Check-in
+              </AppText>
+              <AppText variant="bodyStrong">{formatDate(booking.checkInDate)}</AppText>
+            </View>
+          </View>
+          <View style={styles.rail} />
+          <View style={styles.timeline}>
+            <View style={[styles.dot, !isActive && { backgroundColor: statusColors.checkedOut.fg }]} />
+            <View style={{ flex: 1 }}>
+              <AppText variant="caption" tone="muted">
+                {booking.checkOutActual ? 'Checked out' : 'Expected check-out'}
+              </AppText>
+              <AppText variant="bodyStrong">{formatDate(booking.checkOutActual || booking.checkOutDate)}</AppText>
+              {booking.checkOutActual && booking.checkOutDate ? (
+                <AppText variant="caption" tone="muted">
+                  Planned {formatDate(booking.checkOutDate)}
+                </AppText>
+              ) : null}
+            </View>
+            {isActive ? <Button title="Extend" icon="calendar-outline" size="sm" variant="tonal" onPress={() => {
+                  const next = new Date(booking.checkOutDate);
+                  next.setDate(next.getDate() + 1);
+                  setNewCheckoutDate(isNaN(next.getTime()) ? new Date() : next);
+                  setShowExtendModal(true);
+                }}
+              /> : null}
+          </View>
+        </Card>
+
+        {/* Rooms */}
+        <Card style={styles.card}>
+          <View style={styles.rowBetween}>
+            <AppText variant="overline" tone="muted">
+              Rooms
+            </AppText>
+            {isActive ? (
+              <PressableScale onPress={openRooms} hitSlop={8} accessibilityRole="button" accessibilityLabel="Change rooms" style={styles.editLink}>
+                <Ionicons name="create-outline" size={16} color={colors.brand} />
+                <AppText variant="callout" tone="brand">
+                  Change
+                </AppText>
+              </PressableScale>
+            ) : null}
+          </View>
+          <View style={styles.roomChips}>
+            {roomList.map(rn => (
+              <View key={rn} style={styles.roomChip}>
+                <Ionicons name="bed-outline" size={15} color={colors.brand} />
+                <AppText variant="callout">{rn}</AppText>
+              </View>
+            ))}
+          </View>
+          {booking.room?.type ? (
+            <AppText variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+              {booking.room.type}
+            </AppText>
+          ) : null}
+        </Card>
+
+        {/* Guest & ID */}
+        <Card style={styles.card}>
+          <View style={[styles.rowBetween, { marginBottom: space.xs }]}>
+            <AppText variant="overline" tone="muted">
+              Guest
+            </AppText>
+            {isActive ? (
+              <PressableScale onPress={openEdit} hitSlop={8} accessibilityRole="button" accessibilityLabel="Edit guest details" style={styles.editLink}>
+                <Ionicons name="create-outline" size={16} color={colors.brand} />
+                <AppText variant="callout" tone="brand">
+                  Edit
+                </AppText>
+              </PressableScale>
+            ) : null}
+          </View>
+          <InfoRow label="Mobile" value={booking.customer?.mobile} icon="call-outline" />
+          <InfoRow label="Father's name" value={booking.customer?.father_name} icon="person-outline" />
+          <InfoRow label="Address" value={[booking.customer?.address, booking.customer?.city].filter(Boolean).join(', ')} icon="location-outline" last />
+          {idPhotos.length > 0 ? (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.photos}>
+              {idPhotos.map((url, idx) => (
+                <PressableScale key={`${url}-${idx}`} onPress={() => setSelectedImage(url)} scaleTo={0.95} accessibilityLabel={`ID photo ${idx + 1}`}>
+                  <Image source={mediaImageSource(url)} style={styles.photo} contentFit="cover" transition={150} />
+                </PressableScale>
               ))}
             </ScrollView>
-          );
-        })()}
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Room</Text>
-        <InfoRow label="Room No" value={roomsLabel} />
-        <InfoRow label="Type" value={booking.room?.type || '-'} />
-        <InfoRow
-          label="Status"
-          value={isBooked ? 'Booked / Occupied' : isConfirmed ? 'Confirmed (Future)' : 'Checked Out'}
-          valueStyle={{ color: isBooked ? '#dc2626' : isConfirmed ? '#f59e0b' : '#10b981' }}
-        />
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Stay</Text>
-        <InfoRow label="Check-in" value={formatDate(booking.checkInDate)} />
-        <InfoRow label="Check-out expected" value={formatDate(booking.checkOutDate)} />
-        <InfoRow label="Check-out actual" value={formatDate(booking.checkOutActual)} />
-      </View>
-
-      {isBooked && (
-        <TouchableOpacity
-          style={[styles.button, checkingOut && styles.buttonDisabled]}
-          onPress={handleCheckout}
-          disabled={checkingOut}
-        >
-          <Text style={styles.buttonText}>{checkingOut ? 'Checking out...' : 'Check Out'}</Text>
-        </TouchableOpacity>
-      )}
-
-      <TouchableOpacity style={styles.secondaryButton} onPress={() => setEditRoomsVisible(true)}>
-        <Text style={styles.secondaryButtonText}>Edit Room Allocation</Text>
-      </TouchableOpacity>
-
-      {isActive && (
-        <View style={styles.actionRow}>
-          <TouchableOpacity
-            style={[styles.secondaryButton, { flex: 1 }]}
-            onPress={() => setShowExtendModal(true)}
-          >
-            <Ionicons name="calendar-outline" size={20} color="#111827" />
-            <Text style={styles.secondaryButtonText}>Extend Stay</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {isConfirmed && (
-        <TouchableOpacity
-          style={[styles.button, { backgroundColor: '#f59e0b' }, confirmingCheckIn && styles.buttonDisabled]}
-          onPress={handleConfirmCheckIn}
-          disabled={confirmingCheckIn}
-        >
-          <Text style={styles.buttonText}>{confirmingCheckIn ? 'Processing...' : 'Confirm Check-in'}</Text>
-        </TouchableOpacity>
-      )}
-
-      <Modal visible={showExtendModal} animationType="fade" transparent>
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Extend Stay</Text>
-            <Text style={styles.modalSubtitle}>Select new checkout date</Text>
-
-            <TouchableOpacity
-              style={styles.dateSelector}
-              onPress={() => setShowDatePicker(true)}
-            >
-              <Text style={styles.dateValue}>{formatDate(newCheckoutDate.toISOString())}</Text>
-              <Ionicons name="calendar" size={20} color="#dc2626" />
-            </TouchableOpacity>
-
-            {showDatePicker && (
-              <DateTimePicker
-                value={newCheckoutDate}
-                mode="date"
-                minimumDate={new Date(booking.checkOutDate)}
-                onChange={(event, date) => {
-                  setShowDatePicker(false);
-                  if (date) setNewCheckoutDate(date);
-                }}
-              />
-            )}
-
-            <View style={styles.modalActions}>
-              <TouchableOpacity
-                style={[styles.secondaryButton, { flex: 1 }]}
-                onPress={() => setShowExtendModal(false)}
-              >
-                <Text style={styles.secondaryButtonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.button, { flex: 1, marginTop: 12 }, extending && styles.buttonDisabled]}
-                onPress={handleExtendStay}
-                disabled={extending}
-              >
-                <Text style={styles.buttonText}>{extending ? 'Extending...' : 'Confirm'}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-
-      <Modal visible={editRoomsVisible} animationType="slide" transparent>
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Edit Room Allocation</Text>
-            <Text style={styles.modalSubtitle}>
-              Select one or more rooms. Rooms already booked for this date range are disabled.
-            </Text>
-            <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
-              {rooms.length === 0 ? (
-                <Text style={styles.emptyRoomText}>No rooms available to display.</Text>
-              ) : (
-                rooms.map((room) => {
-                  const unavailable = isRoomUnavailable(room);
-                  const selected = roomSelection.has(room.room_no);
-                  const heldByUs =
-                    room.current_booking_id &&
-                    relatedBookingIds.includes(room.current_booking_id);
-                  return (
-                    <TouchableOpacity
-                      key={room.key}
-                      style={[
-                        styles.roomRow,
-                        selected && styles.roomRowSelected,
-                        unavailable && styles.roomRowDisabled,
-                      ]}
-                      onPress={() => !unavailable && toggleRoomSelection(room.room_no)}
-                      disabled={unavailable}
-                    >
-                      <Text
-                        style={[
-                          styles.roomRowText,
-                          unavailable && styles.roomRowTextDisabled,
-                          selected && styles.roomRowTextSelected,
-                        ]}
-                      >
-                        {(() => {
-                          const isBasementOrCommon =
-                            room.type.toLowerCase().includes('basement') ||
-                            room.type.toLowerCase().includes('common') ||
-                            room.room_no.toLowerCase().includes('basement') ||
-                            room.room_no.toLowerCase().startsWith('cb');
-
-                          const isSpecialHall = room.room_no === '302' || room.room_no === '304';
-
-                          if (isBasementOrCommon) {
-                            // Just show room number (e.g., "Basement 1" or "CB1")
-                            return room.room_no;
-                          }
-
-                          // Regular rooms: "Room {number} · {type} · {beds} bed(s)"
-                          let display = `Room ${room.room_no}`;
-                          if (room.type) {
-                            display += ` · ${room.type}`;
-                          }
-                          if (!isSpecialHall) {
-                            display += ` · ${room.beds} bed${room.beds === 1 ? '' : 's'}`;
-                          }
-                          return display;
-                        })()}
-                      </Text>
-                      {unavailable ? (
-                        <Text style={styles.unavailableBadge}>Unavailable</Text>
-                      ) : selected ? (
-                        <Text style={styles.selectedBadge}>{heldByUs ? 'Currently allocated' : 'Selected'}</Text>
-                      ) : null}
-                    </TouchableOpacity>
-                  );
-                })
-              )}
-            </ScrollView>
-            <View style={styles.modalActions}>
-              <TouchableOpacity
-                style={[styles.secondaryButton, { flex: 1 }]}
-                onPress={() => setEditRoomsVisible(false)}
-              >
-                <Text style={styles.secondaryButtonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.button, styles.modalSaveButton, savingRooms && styles.buttonDisabled]}
-                onPress={handleSaveRooms}
-                disabled={savingRooms}
-              >
-                <Text style={styles.buttonText}>{savingRooms ? 'Saving...' : 'Save'}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Full Image Viewer */}
-      <Modal visible={!!selectedImage} transparent animationType="fade">
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' }}>
-          <TouchableOpacity
-            style={{ position: 'absolute', top: 50, right: 20, zIndex: 10, padding: 10 }}
-            onPress={() => setSelectedImage(null)}
-          >
-            <Ionicons name="close-circle" size={40} color="#fff" />
-          </TouchableOpacity>
-          {selectedImage && (
-            <Image
-              source={mediaImageSource(selectedImage)}
-              style={{ width: '95%', height: '80%' }}
-              contentFit="contain"
+          ) : (
+            <AppText variant="caption" tone="muted" style={{ marginTop: space.md }}>
+              No ID photos yet.
+            </AppText>
+          )}
+          {booking.customerId ? (
+            <Button
+              title="Open guest profile"
+              variant="secondary"
+              iconRight="chevron-forward"
+              onPress={() => router.push(`/customer-detail/${booking.customerId}` as any)}
+              style={{ marginTop: space.lg }}
+              fullWidth
             />
+          ) : null}
+        </Card>
+      </ScrollView>
+
+      {/* Primary action */}
+      {isActive ? (
+        <View style={styles.footer}>
+          {isConfirmed ? (
+            <Button title="Confirm check-in" icon="log-in-outline" size="lg" onPress={handleConfirmCheckIn} loading={confirmingCheckIn} fullWidth />
+          ) : inHouse ? (
+            <SlideToConfirm label="Slide to check out" onConfirm={handleCheckout} />
+          ) : (
+            <Button title="Edit booking" icon="create-outline" size="lg" variant="secondary" onPress={openEdit} fullWidth />
           )}
         </View>
+      ) : null}
+
+      {/* Extend stay */}
+      <Sheet
+        visible={showExtendModal}
+        onClose={() => setShowExtendModal(false)}
+        title="Extend stay"
+        subtitle={`Currently until ${formatDate(booking.checkOutDate)}`}
+        footer={<Button title="Save new date" size="lg" fullWidth loading={extending} onPress={handleExtendStay} />}
+      >
+        {Platform.OS === 'ios' ? (
+          <DateTimePicker
+            value={newCheckoutDate}
+            mode="date"
+            display="inline"
+            themeVariant="light"
+            accentColor={colors.brand}
+            minimumDate={new Date(booking.checkOutDate)}
+            onValueChange={(_event, date) => setNewCheckoutDate(date)}
+          />
+        ) : (
+          <SelectField
+            label="New check-out date"
+            value={formatDate(newCheckoutDate.toISOString())}
+            onPress={() =>
+              DateTimePickerAndroid.open({
+                value: newCheckoutDate,
+                mode: 'date',
+                minimumDate: new Date(booking.checkOutDate),
+                onValueChange: (_event, date) => setNewCheckoutDate(date),
+              })
+            }
+          />
+        )}
+      </Sheet>
+
+      {/* Change rooms */}
+      <Sheet
+        visible={editRoomsVisible}
+        onClose={() => setEditRoomsVisible(false)}
+        title="Change rooms"
+        subtitle="Rooms booked for these dates are greyed out."
+        footer={<Button title={`Save ${roomSelection.size} room${roomSelection.size === 1 ? '' : 's'}`} size="lg" fullWidth loading={savingRooms} onPress={handleSaveRooms} />}
+      >
+        <RoomPicker rooms={rooms} selected={roomSelection} unavailable={unavailable} onToggle={toggleRoomSelection} />
+      </Sheet>
+
+      {/* Full-screen ID photo */}
+      <Modal visible={!!selectedImage} transparent animationType="fade" onRequestClose={() => setSelectedImage(null)} statusBarTranslucent>
+        <Pressable style={styles.viewer} onPress={() => setSelectedImage(null)} accessibilityLabel="Close photo">
+          {selectedImage ? <Image source={mediaImageSource(selectedImage)} style={styles.viewerImg} contentFit="contain" /> : null}
+          <View style={styles.viewerClose}>
+            <Ionicons name="close" size={26} color={colors.inkInverse} />
+          </View>
+        </Pressable>
       </Modal>
-    </ScrollView>
+    </SafeAreaView>
   );
 };
 
-const InfoRow = ({
-  label,
-  value,
-  valueStyle,
-}: {
-  label: string;
-  value?: string | number | null;
-  valueStyle?: any;
-}) => (
-  <View style={styles.infoRow}>
-    <Text style={styles.infoLabel}>{label}</Text>
-    <Text style={[styles.infoValue, valueStyle]}>{value || '-'}</Text>
-  </View>
-);
+const formatShort = (iso?: string) => {
+  const d = iso ? new Date(iso) : null;
+  return d && !isNaN(d.getTime()) ? d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : '';
+};
 
 const formatDate = (iso?: string) => {
-  if (!iso) return '-';
+  if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  return d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 };
 
 const styles = StyleSheet.create({
-  container: {
-    padding: 16,
-    backgroundColor: '#f9fafb',
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#111827',
-    marginBottom: 12,
-  },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1f2937',
-    marginBottom: 8,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 6,
-  },
-  infoLabel: {
-    color: '#6b7280',
-    fontSize: 14,
-  },
-  infoValue: {
-    color: '#111827',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  button: {
-    marginTop: 12,
-    backgroundColor: '#dc2626',
-    padding: 16,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  secondaryButton: {
-    marginTop: 12,
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#d1d5db',
-    padding: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  secondaryButtonText: {
-    color: '#111827',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  buttonDisabled: {
-    opacity: 0.7,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    padding: 16,
-  },
-  modalCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    maxHeight: '90%',
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#111827',
-    marginBottom: 4,
-  },
-  modalSubtitle: {
-    color: '#6b7280',
-    marginBottom: 12,
-  },
-  modalList: {
-    maxHeight: 340,
-  },
-  modalListContent: {
-    gap: 8,
-  },
-  roomRow: {
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    borderRadius: 10,
-    padding: 12,
-    backgroundColor: '#fff',
-  },
-  roomRowSelected: {
-    borderColor: '#f59e0b',
-    backgroundColor: '#fef3c7',
-  },
-  roomRowDisabled: {
-    backgroundColor: '#f3f4f6',
-  },
-  roomRowText: {
-    color: '#111827',
-    fontWeight: '600',
-  },
-  roomRowTextSelected: {
-    color: '#92400e',
-  },
-  roomRowTextDisabled: {
-    color: '#9ca3af',
-  },
-  unavailableBadge: {
-    color: '#b91c1c',
-    fontWeight: '700',
-    marginTop: 4,
-  },
-  selectedBadge: {
-    color: '#065f46',
-    fontWeight: '700',
-    marginTop: 4,
-  },
-  emptyRoomText: {
-    color: '#6b7280',
-    textAlign: 'center',
-    paddingVertical: 20,
-  },
-  modalActions: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 12,
-  },
-  modalSaveButton: {
-    flex: 1,
-  },
-  actionRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginBottom: 4,
-  },
-  dateSelector: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 16,
-    backgroundColor: '#f9fafb',
-  },
-  dateValue: {
-    fontSize: 16,
-    color: '#111827',
-    fontWeight: '600',
-  },
+  safe: { flex: 1, backgroundColor: colors.bg },
+  content: { paddingHorizontal: GUTTER, paddingBottom: space.huge },
+  hero: { marginTop: space.xs, marginBottom: space.md },
+  heroTop: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  stats: { flexDirection: 'row', marginTop: space.lg, backgroundColor: colors.surfaceAlt, borderRadius: radius.md, paddingVertical: space.md },
+  stat: { flex: 1, alignItems: 'center', gap: 2, paddingHorizontal: space.xs },
+  statLine: { borderLeftWidth: 1, borderLeftColor: colors.line },
+  card: { marginBottom: space.md },
+  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: space.md },
+  timeline: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  dot: { width: 12, height: 12, borderRadius: 6, backgroundColor: colors.brand },
+  rail: { width: 2, height: 22, backgroundColor: colors.line, marginLeft: 5, marginVertical: 4 },
+  roomChips: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  roomChip: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.brandSoft, paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.pill },
+  photos: { gap: space.sm, marginTop: space.md },
+  photo: { width: 120, height: 88, borderRadius: radius.sm, backgroundColor: colors.surfaceAlt },
+  footer: { paddingHorizontal: GUTTER, paddingTop: space.md, paddingBottom: space.sm, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.line },
+  editLink: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  viewer: { flex: 1, backgroundColor: 'rgba(0,0,0,0.94)', alignItems: 'center', justifyContent: 'center' },
+  viewerImg: { width: '100%', height: '80%' },
+  viewerClose: { position: 'absolute', top: 56, right: 20, width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
 });
 
 export default BookingDetailScreen;

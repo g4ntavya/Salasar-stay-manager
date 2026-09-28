@@ -81,7 +81,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setProfile(null);
     // Guest data must not stay on a device after its user signs out. Photos still
     // waiting to upload are kept; they resume when an authorized user signs in.
-    await clearAllCache([UPLOAD_QUEUE_STORAGE_KEY]).catch(() => {});
+    await clearAllCache([UPLOAD_QUEUE_STORAGE_KEY, 'lastSeenVersion']).catch(() => {});
   };
 
   useEffect(() => {

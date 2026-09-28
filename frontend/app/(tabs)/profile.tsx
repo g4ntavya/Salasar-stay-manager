@@ -1,362 +1,193 @@
-import React, { useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-  Alert,
-
-} from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Alert, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
+import Constants from 'expo-constants';
 import { useAuth } from '../../src/context/AuthContext';
-import { Ionicons } from '@expo/vector-icons';
 import LoadingSpinner from '../../src/components/LoadingSpinner';
-import { rebuildMonthlyStats } from '../../src/utils/rtdbService';
+import { rebuildMonthlyStats, repairRoomStatuses } from '../../src/utils/rtdbService';
+import { AppText, Avatar, Button, Card, Divider, IconBadge, ListItem, NavBar, Screen, StatusPill, colors, haptic, space } from '../../src/ui';
+
+const ROLE_LABEL: Record<string, string> = { ADMIN: 'Administrator', STAFF: 'Front desk', GROWTH: 'Insights' };
 
 const ProfileScreen = () => {
   const router = useRouter();
   const { user, profile, loading, signOut } = useAuth();
-
-
-
-  const handleSignOut = () => {
-    Alert.alert(
-      'Sign Out',
-      'Are you sure you want to sign out?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Sign Out',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await signOut();
-              router.replace('/login');
-            } catch (error) {
-              console.error('Sign out error:', error);
-              alert('Failed to sign out');
-            }
-          },
-        },
-      ]
-    );
-  };
-
-
-
-  if (loading && !profile) {
-    return <LoadingSpinner message="Loading profile..." />;
-  }
+  const [busy, setBusy] = useState<'sync' | 'repair' | null>(null);
+  const isAdmin = profile?.role === 'ADMIN';
 
   useEffect(() => {
-    if (!loading && !user) {
-      router.replace('/login');
-    }
+    if (!loading && !user) router.replace('/login');
   }, [loading, user, router]);
 
-  if (!user && !loading) {
-    return <LoadingSpinner message="Redirecting..." />;
-  }
+  if (!profile) return <LoadingSpinner message="Loading profile…" />;
 
-  // Roles come only from users/{uid} in the database (enforced by security rules).
-  const effectiveProfile = profile;
+  const handleSignOut = () =>
+    Alert.alert('Sign out', 'Guest data cached on this phone will be cleared.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Sign out',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await signOut();
+            router.replace('/login');
+          } catch {
+            Alert.alert('Could not sign out', 'Please try again.');
+          }
+        },
+      },
+    ]);
 
-  if (!effectiveProfile) {
-    return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <Text style={{ color: '#6b7280' }}>No profile found.</Text>
-      </View>
-    );
-  }
+  const runSync = () =>
+    Alert.alert('Sync analytics', 'Recalculates all revenue totals from every booking. This can take a moment.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Sync now',
+        onPress: async () => {
+          setBusy('sync');
+          try {
+            const result = await rebuildMonthlyStats();
+            haptic.success();
+            Alert.alert('Analytics synced', `Recalculated from ${result?.count || 0} completed stays.`);
+          } catch {
+            Alert.alert('Sync failed', 'Check your connection and try again.');
+          } finally {
+            setBusy(null);
+          }
+        },
+      },
+    ]);
+
+  const runRepair = () =>
+    Alert.alert('Repair room status', "Matches every room's occupied/free status to the open bookings. No guest is checked out.", [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Repair',
+        onPress: async () => {
+          setBusy('repair');
+          try {
+            const res = await repairRoomStatuses();
+            haptic.success();
+            Alert.alert('Done', res.repaired > 0 ? `Corrected ${res.repaired} room(s).` : 'All room statuses were already correct.');
+          } catch {
+            Alert.alert('Repair failed', 'Check your connection and try again.');
+          } finally {
+            setBusy(null);
+          }
+        },
+      },
+    ]);
+
+  const version = Constants.expoConfig?.version ?? '';
 
   return (
-    <ScrollView style={styles.container}>
-      {/* Profile Header */}
-      <View style={styles.header}>
-        <View style={styles.avatarContainer}>
-          <View style={styles.avatar}>
-            <Ionicons name="person" size={48} color="#fff" />
-          </View>
-        </View>
-        <Text style={styles.name}>{effectiveProfile.full_name}</Text>
-        <View
-          style={[
-            styles.roleBadge,
-            effectiveProfile.role === 'ADMIN' ? styles.adminBadge : styles.staffBadge,
-          ]}
-        >
-          <Text style={styles.roleText}>{effectiveProfile.role}</Text>
-        </View>
+    <Screen>
+      <View style={{ marginHorizontal: -20 }}>
+        <NavBar title="Profile" />
       </View>
 
-      {/* Profile Details */}
-      <View style={styles.section}>
-        <View style={styles.detailItem}>
-          <View style={styles.detailIcon}>
-            <Ionicons name="mail" size={20} color="#6b7280" />
-          </View>
-          <View style={styles.detailContent}>
-            <Text style={styles.detailLabel}>Email</Text>
-            <Text style={styles.detailValue}>{effectiveProfile.email}</Text>
-          </View>
+      <Card style={styles.hero}>
+        <Avatar name={profile.full_name} size={72} />
+        <View style={{ flex: 1 }}>
+          <AppText variant="title2" numberOfLines={2}>
+            {profile.full_name}
+          </AppText>
+          <AppText variant="footnote" tone="muted" numberOfLines={1} style={{ marginVertical: 2 }}>
+            {profile.email}
+          </AppText>
+          <StatusPill tone={isAdmin ? 'reserved' : 'available'} label={ROLE_LABEL[profile.role] || profile.role} size="sm" />
         </View>
+      </Card>
 
-        <View style={styles.detailItem}>
-          <View style={styles.detailIcon}>
-            <Ionicons name="shield-checkmark" size={20} color="#6b7280" />
-          </View>
-          <View style={styles.detailContent}>
-            <Text style={styles.detailLabel}>Role</Text>
-            <Text style={styles.detailValue}>{effectiveProfile.role}</Text>
-          </View>
-        </View>
+      <AppText variant="overline" tone="muted" style={styles.groupLabel}>
+        Insights
+      </AppText>
+      <Card padded={false} style={styles.group}>
+        <ListItem
+          title="Revenue analytics"
+          subtitle="Monthly revenue, growth and Cash/UPI split"
+          leading={<IconBadge icon="trending-up-outline" />}
+          onPress={() => router.push('/analytics')}
+          style={styles.item}
+        />
+        <Divider inset={68} />
+        <ListItem
+          title="Reports"
+          subtitle="Revenue and occupancy by date range, CSV export"
+          leading={<IconBadge icon="document-text-outline" bg={colors.goldSoft} fg={colors.gold} />}
+          onPress={() => router.push('/reports')}
+          style={styles.item}
+        />
+      </Card>
 
-        <View style={styles.detailItem}>
-          <View style={styles.detailIcon}>
-            <Ionicons name="id-card" size={20} color="#6b7280" />
-          </View>
-          <View style={styles.detailContent}>
-            <Text style={styles.detailLabel}>User ID</Text>
-            <Text style={styles.detailValue}>{effectiveProfile.id}</Text>
-          </View>
-        </View>
-      </View>
+      {isAdmin ? (
+        <>
+          <AppText variant="overline" tone="muted" style={styles.groupLabel}>
+            Admin tools
+          </AppText>
+          <Card padded={false} style={styles.group}>
+            <ListItem
+              title={busy === 'sync' ? 'Syncing…' : 'Sync analytics'}
+              subtitle="Rebuild revenue totals from all bookings"
+              leading={<IconBadge icon="sync-outline" bg={colors.successSoft} fg={colors.success} />}
+              onPress={busy ? undefined : runSync}
+              style={styles.item}
+            />
+            <Divider inset={68} />
+            <ListItem
+              title={busy === 'repair' ? 'Repairing…' : 'Repair room status'}
+              subtitle="Fix rooms stuck as occupied or free"
+              leading={<IconBadge icon="construct-outline" bg={colors.warningSoft} fg={colors.warning} />}
+              onPress={busy ? undefined : runRepair}
+              style={styles.item}
+            />
+            <Divider inset={68} />
+            <ListItem
+              title="Sync & storage"
+              subtitle="Pending photo uploads, photo server, cache"
+              leading={<IconBadge icon="cloud-done-outline" bg={colors.infoSoft} fg={colors.info} />}
+              onPress={() => router.push('/app-health')}
+              style={styles.item}
+            />
+          </Card>
+        </>
+      ) : null}
 
-      {/* Permissions */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Permissions</Text>
-        <View style={styles.permissionsList}>
-          <View style={styles.permissionItem}>
-            <Ionicons name="checkmark-circle" size={20} color="#10b981" />
-            <Text style={styles.permissionText}>View Dashboard</Text>
-          </View>
-          <View style={styles.permissionItem}>
-            <Ionicons name="checkmark-circle" size={20} color="#10b981" />
-            <Text style={styles.permissionText}>Manage Bookings</Text>
-          </View>
-          <View style={styles.permissionItem}>
-            <Ionicons name="checkmark-circle" size={20} color="#10b981" />
-            <Text style={styles.permissionText}>View Customers</Text>
-          </View>
-          {effectiveProfile.role === 'ADMIN' && (
-            <>
-              <View style={styles.permissionItem}>
-                <Ionicons name="checkmark-circle" size={20} color="#10b981" />
-                <Text style={styles.permissionText}>Manage Rooms</Text>
-              </View>
-              <View style={styles.permissionItem}>
-                <Ionicons name="checkmark-circle" size={20} color="#10b981" />
-                <Text style={styles.permissionText}>Delete Bookings</Text>
-              </View>
-            </>
-          )}
-        </View>
-      </View>
+      <AppText variant="overline" tone="muted" style={styles.groupLabel}>
+        App
+      </AppText>
+      <Card padded={false} style={styles.group}>
+        <ListItem
+          title="What's new"
+          subtitle="Recent updates to the app"
+          leading={<IconBadge icon="sparkles-outline" bg={colors.goldSoft} fg={colors.gold} />}
+          onPress={() => router.push('/changelog')}
+          style={styles.item}
+        />
+        <Divider inset={68} />
+        <ListItem
+          title="Version"
+          leading={<IconBadge icon="information-circle-outline" bg={colors.surfaceAlt} fg={colors.inkSoft} />}
+          trailing={
+            <AppText variant="callout" tone="muted">
+              {version}
+            </AppText>
+          }
+          chevron={false}
+          style={styles.item}
+        />
+      </Card>
 
-      {/* Management Section */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Management</Text>
-        <View style={styles.managementList}>
-          {effectiveProfile.role === 'ADMIN' && (
-            <>
-              <TouchableOpacity
-                style={styles.managementItem}
-                onPress={() => router.push('/reports' as any)}
-              >
-                <View style={styles.managementIconContainer}>
-                  <Ionicons name="bar-chart" size={20} color="#dc2626" />
-                </View>
-                <Text style={styles.managementText}>Reports & Analytics</Text>
-                <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.managementItem}
-                onPress={() => {
-                  Alert.alert(
-                    'Sync Analytics',
-                    'This will scan your entire booking history to repair the reports index. This may take a moment. Continue?',
-                    [
-                      { text: 'Cancel', style: 'cancel' },
-                      {
-                        text: 'Sync Now',
-                        onPress: async () => {
-                          try {
-                            const result = await rebuildMonthlyStats();
-                            Alert.alert('Success', `Reports synchronized! Processed ${result?.count || 0} bookings.`);
-                          } catch (error) {
-                            console.error('Sync error:', error);
-                            Alert.alert('Error', 'Failed to sync data.');
-                          }
-                        }
-                      }
-                    ]
-                  );
-                }}
-              >
-                <View style={[styles.managementIconContainer, { backgroundColor: '#d1fae5' }]}>
-                  <Ionicons name="refresh-circle" size={20} color="#059669" />
-                </View>
-                <Text style={styles.managementText}>Sync Analytics Data</Text>
-                <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
-              </TouchableOpacity>
-            </>
-          )}
-        </View>
-      </View>
-
-      {/* Sign Out Button */}
-      <View style={styles.section}>
-        <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut}>
-          <Ionicons name="log-out" size={20} color="#fff" />
-          <Text style={styles.signOutText}>Sign Out</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Version Info */}
-      <Text style={styles.versionText}>Salasar Stay Manager v1.0.0</Text>
-    </ScrollView>
+      <Button title="Sign out" icon="log-out-outline" variant="danger" onPress={handleSignOut} fullWidth style={{ marginTop: space.lg }} />
+    </Screen>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f9fafb',
-  },
-  header: {
-    backgroundColor: '#fff',
-    padding: 32,
-    alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e7eb',
-  },
-  avatarContainer: {
-    marginBottom: 16,
-  },
-  avatar: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    backgroundColor: '#dc2626',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  name: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#1f2937',
-    marginBottom: 8,
-  },
-  roleBadge: {
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    borderRadius: 12,
-  },
-  adminBadge: {
-    backgroundColor: '#dbeafe',
-  },
-  staffBadge: {
-    backgroundColor: '#fef3c7',
-  },
-  roleText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#1f2937',
-  },
-  section: {
-    backgroundColor: '#fff',
-    marginTop: 16,
-    padding: 16,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#1f2937',
-    marginBottom: 16,
-  },
-  detailItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  detailIcon: {
-    width: 40,
-    alignItems: 'center',
-  },
-  detailContent: {
-    flex: 1,
-  },
-  detailLabel: {
-    fontSize: 12,
-    color: '#9ca3af',
-    marginBottom: 4,
-  },
-  detailValue: {
-    fontSize: 16,
-    color: '#1f2937',
-    fontWeight: '500',
-  },
-  permissionsList: {
-    gap: 12,
-  },
-  permissionItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  permissionText: {
-    fontSize: 16,
-    color: '#4b5563',
-  },
-  managementList: {
-    gap: 12,
-  },
-  managementItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  managementIconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#fee2e2',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  managementText: {
-    flex: 1,
-    fontSize: 16,
-    color: '#1f2937',
-    fontWeight: '500',
-  },
-  signOutButton: {
-    backgroundColor: '#dc2626',
-    borderRadius: 12,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  signOutText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  versionText: {
-    textAlign: 'center',
-    color: '#9ca3af',
-    fontSize: 12,
-    marginVertical: 24,
-  },
+  hero: { flexDirection: 'row', alignItems: 'center', gap: space.lg, marginTop: space.sm },
+  groupLabel: { marginTop: space.xxl, marginBottom: space.sm, marginLeft: space.xs },
+  group: { paddingHorizontal: space.lg },
+  item: { paddingVertical: space.md + 2 },
 });
 
 export default ProfileScreen;

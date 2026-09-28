@@ -1,120 +1,66 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
+import { ScrollView, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { AppText, Button, colors, radius, space } from '../ui';
 
 interface Props {
-    children?: ReactNode;
-    fallback?: ReactNode;
+  children?: ReactNode;
+  fallback?: ReactNode;
 }
 
 interface State {
-    hasError: boolean;
-    error: Error | null;
-    errorInfo: ErrorInfo | null;
+  hasError: boolean;
+  error: Error | null;
 }
 
+/** Catches render crashes and shows a calm recovery screen instead of a blank app. */
 class ErrorBoundary extends Component<Props, State> {
-    public state: State = {
-        hasError: false,
-        error: null,
-        errorInfo: null,
-    };
+  public state: State = { hasError: false, error: null };
 
-    public static getDerivedStateFromError(error: Error): State {
-        return { hasError: true, error, errorInfo: null };
-    }
+  public static getDerivedStateFromError(error: Error): State {
+    return { hasError: true, error };
+  }
 
-    public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-        console.error('[ErrorBoundary] Uncaught error:', error, errorInfo);
-        this.setState({ errorInfo });
-    }
+  public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error('[ErrorBoundary] Uncaught error:', error, errorInfo);
+  }
 
-    private handleReset = () => {
-        this.setState({ hasError: false, error: null, errorInfo: null });
-    };
+  private handleReset = () => this.setState({ hasError: false, error: null });
 
-    public render() {
-        if (this.state.hasError) {
-            if (this.props.fallback) return this.props.fallback;
-
-            return (
-                <View style={styles.container}>
-                    <ScrollView contentContainerStyle={styles.content}>
-                        <Ionicons name="alert-circle-outline" size={80} color="#dc2626" />
-                        <Text style={styles.title}>Oops! Something went wrong.</Text>
-                        <Text style={styles.subtitle}>
-                            The app encountered an unexpected error. Don't worry, your data is safe.
-                        </Text>
-
-                        <View style={styles.errorBox}>
-                            <Text style={styles.errorText}>
-                                {this.state.error?.toString()}
-                            </Text>
-                        </View>
-
-                        <TouchableOpacity style={styles.button} onPress={this.handleReset}>
-                            <Text style={styles.buttonText}>Try Again</Text>
-                        </TouchableOpacity>
-                    </ScrollView>
-                </View>
-            );
-        }
-
-        return this.props.children;
-    }
+  public render() {
+    if (!this.state.hasError) return this.props.children;
+    if (this.props.fallback) return this.props.fallback;
+    return (
+      <View style={styles.container}>
+        <ScrollView contentContainerStyle={styles.content}>
+          <View style={styles.icon}>
+            <Ionicons name="cloud-offline-outline" size={34} color={colors.brand} />
+          </View>
+          <AppText variant="title1" align="center">
+            Something went wrong
+          </AppText>
+          <AppText variant="body" tone="soft" align="center" style={{ marginTop: space.sm, maxWidth: 300 }}>
+            The app hit an unexpected problem. Your bookings and guest data are safe on the server.
+          </AppText>
+          {__DEV__ && this.state.error ? (
+            <View style={styles.details}>
+              <AppText variant="caption" tone="danger">
+                {this.state.error.toString()}
+              </AppText>
+            </View>
+          ) : null}
+          <Button title="Try again" icon="refresh" size="lg" onPress={this.handleReset} style={{ marginTop: space.xxl, alignSelf: 'stretch' }} />
+        </ScrollView>
+      </View>
+    );
+  }
 }
 
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#fff',
-        padding: 24,
-        justifyContent: 'center',
-    },
-    content: {
-        alignItems: 'center',
-        paddingTop: 100,
-    },
-    title: {
-        fontSize: 24,
-        fontWeight: 'bold',
-        color: '#1f2937',
-        marginTop: 24,
-        textAlign: 'center',
-    },
-    subtitle: {
-        fontSize: 16,
-        color: '#6b7280',
-        marginTop: 12,
-        textAlign: 'center',
-        paddingHorizontal: 20,
-    },
-    errorBox: {
-        backgroundColor: '#fef2f2',
-        padding: 16,
-        borderRadius: 8,
-        marginTop: 32,
-        width: '100%',
-        borderWidth: 1,
-        borderColor: '#fecaca',
-    },
-    errorText: {
-        fontFamily: 'monospace',
-        color: '#991b1b',
-        fontSize: 12,
-    },
-    button: {
-        backgroundColor: '#dc2626',
-        paddingVertical: 14,
-        paddingHorizontal: 32,
-        borderRadius: 12,
-        marginTop: 40,
-    },
-    buttonText: {
-        color: '#fff',
-        fontWeight: '700',
-        fontSize: 16,
-    },
+  container: { flex: 1, backgroundColor: colors.bg },
+  content: { flexGrow: 1, alignItems: 'center', justifyContent: 'center', padding: space.xxxl },
+  icon: { width: 76, height: 76, borderRadius: 38, backgroundColor: colors.brandSoft, alignItems: 'center', justifyContent: 'center', marginBottom: space.xl },
+  details: { marginTop: space.xl, padding: space.md, borderRadius: radius.md, backgroundColor: colors.dangerSoft, alignSelf: 'stretch' },
 });
 
 export default ErrorBoundary;

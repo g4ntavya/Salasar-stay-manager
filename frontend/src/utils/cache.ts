@@ -302,52 +302,24 @@ export const testCacheStorage = async (): Promise<boolean> => {
   }
 };
 
-// Pre-populate cache on app startup by fetching ONLY recent data to keep costs low.
-// Writes to bookings:list and customers:recent so Bookings/Customers tabs load instantly.
+// On sign-in: drop any oversized cache entries and warm the guest search index.
+// Bookings, guests and rooms stream in through their live listeners, so they need no prefetch.
 export const preBuildCache = async (): Promise<void> => {
-  console.log('[Cache] === STARTING LIGHT CACHE PRE-BUILD ===');
-
   try {
     const startTime = Date.now();
-    const { fetchBookingsEnriched } = await import('./rtdbService');
-    // 🚀 SELF-HEALING: Check if current cache is corrupted/heavy
     const keys = await AsyncStorage.getAllKeys();
     for (const k of keys) {
       const size = (await AsyncStorage.getItem(k))?.length || 0;
-      if (size > 5_000_000) { // 5MB limit
-        console.warn(`[Cache] Emergency Purging HEAVY entry: ${k} (${Math.round(size / 1024)}KB)`);
+      if (size > 5_000_000) {
+        console.warn(`[Cache] Purging oversized entry: ${k} (${Math.round(size / 1024)}KB)`);
         await AsyncStorage.removeItem(k);
         memoryCache.delete(k);
       }
     }
 
-    const { fetchCustomers, fetchAllRooms, syncCustomerIndex } = await import('./rtdbService');
-
-    const [enrichedBookings, freshCustomers, rooms] = await Promise.all([
-      fetchBookingsEnriched(50).catch(() => []),
-      fetchCustomers(50).catch(() => []),
-      fetchAllRooms().catch(() => []),
-    ]);
-
-    if (enrichedBookings.length > 0) await setCached('bookings:list', enrichedBookings);
-
-    if (freshCustomers.length > 0) {
-      // Keep local photo previews for guests whose photos are still uploading.
-      const existingRecent = (await getCached<any[]>('customers:recent')) || [];
-      const merged = freshCustomers.map((fresh: any) => {
-        const old: any = existingRecent.find((o: any) => o.id === fresh.id);
-        const hasLocalOnly =
-          !fresh.idImageUrls?.length &&
-          old?.idImageUrls?.some((u: string) => typeof u === 'string' && u.startsWith('file:'));
-        return hasLocalOnly ? { ...fresh, idImageUrls: old.idImageUrls, idImageUrl: old.idImageUrl } : fresh;
-      });
-      await setCached('customers:recent', merged);
-    }
-
-    if (rooms.length > 0) await setCached('rooms:list', rooms);
-
-    // Warm the all-guests search index in the background (only downloads changes).
-    syncCustomerIndex().catch(() => {});
+    const { syncCustomerIndex } = await import('./rtdbService');
+    // Only downloads guests changed since the last sync.
+    await syncCustomerIndex().catch(() => {});
 
     console.log(`[Cache] Light pre-build complete in ${Date.now() - startTime}ms`);
   } catch (err) {

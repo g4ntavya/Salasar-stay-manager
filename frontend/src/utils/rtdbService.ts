@@ -27,12 +27,13 @@ import {
   startAfter,
   endAt,
   runTransaction,
+  type Query,
 } from 'firebase/database';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { defaultRoomSeeds } from './defaultRooms';
 import { TOTAL_ROOMS } from './roomConstants';
 import { amountFields, parseAmount, normalizePaymentMode } from './amount';
-import { localDay, addDays } from './date';
+import { localDay } from './date';
 import { stayDelta, statsUpdates, type RevenueDelta } from '../firebase/stats';
 import { queueImageUpload } from './uploadQueue';
 import { isBase64Image, saveBase64ToFile } from './imageStorage';
@@ -169,6 +170,10 @@ export const compareRoomIds = (a: any, b: any): number => {
   const isBLast = sB.toLowerCase().includes('basement') || sB.toLowerCase().startsWith('cb');
   if (isALast && !isBLast) return 1;
   if (!isALast && isBLast) return -1;
+  // Within the halls & basement group: all "Basement N" first, then "CB N".
+  const prefixA = sA.replace(/[\d\s]/g, '').toLowerCase();
+  const prefixB = sB.replace(/[\d\s]/g, '').toLowerCase();
+  if (isALast && isBLast && prefixA !== prefixB) return prefixA.localeCompare(prefixB);
 
   const numA = parseInt(sA.replace(/\D/g, ''), 10);
   const numB = parseInt(sB.replace(/\D/g, ''), 10);
@@ -350,15 +355,14 @@ export const computeRoomStats = (rooms: RtdbRoom[]) => {
    ACTIVE BOOKINGS (shared live listener)
 ============================================================ */
 
-// Bookings whose expected checkout is yesterday or later: current stays plus advance
-// bookings. This set stays small forever, unlike "the last N bookings".
+// Every open booking: guests in house (including any past their check-out date) plus
+// advance bookings. Checked-out stays leave this set, so it stays small forever.
 let activeUnsubscribe: (() => void) | null = null;
 let lastActiveBookings: BookingRecord[] | null = null;
 const activeWatchers = new Set<(bookings: BookingRecord[]) => void>();
 const activeErrorWatchers = new Set<(error: unknown) => void>();
 
-const activeBookingsQuery = () =>
-  query(ref(rtdb, 'bookings'), orderByChild('checkOutDay'), startAt(addDays(localDay(), -1)));
+const activeBookingsQuery = () => query(ref(rtdb, 'bookings'), orderByChild('status'), equalTo('BOOKED'));
 
 export const subscribeToActiveBookings = (
   callback: (bookings: BookingRecord[]) => void,
@@ -400,15 +404,19 @@ export const fetchActiveBookings = async (): Promise<BookingRecord[]> => {
   return snapToRecords(snap.val());
 };
 
-/** Room numbers of open bookings whose stay window includes `day`. */
+/**
+ * Room numbers of open bookings whose stay window includes `day`. A guest who is past
+ * their check-out date but not checked out still occupies the room today.
+ */
 const roomsOccupiedOn = (bookings: BookingRecord[], day: string): Set<string> => {
   const set = new Set<string>();
+  const today = localDay();
   for (const b of bookings) {
     if (!isOpen(b)) continue;
     const inDay = checkInDayOf(b);
     const outDay = checkOutDayOf(b);
     if (!inDay || !outDay || inDay > outDay) continue;
-    if (inDay <= day && day <= outDay) {
+    if (inDay <= day && (day <= outDay || day <= today)) {
       const roomNo = normalizeRoomId(b.roomNo ?? b.room_no);
       if (roomNo) set.add(roomNo);
     }
@@ -725,10 +733,12 @@ export const updateCustomer = async (id: string, data: any): Promise<void> => {
     if (field && value !== undefined) patch[field] = str(value);
   }
   if (data.membersCount !== undefined) patch.membersCount = Number(data.membersCount) || 0;
+  if (data.paymentMode !== undefined) patch.paymentMode = normalizePaymentMode(data.paymentMode);
 
+  // Photos are replaced when new ones are given, or when `replacePhotos` is set (which may clear them).
   let localImages: string[] = [];
   const imageInputs = collectImageInputs(data);
-  if (imageInputs.length > 0) {
+  if (imageInputs.length > 0 || data.replacePhotos === true) {
     const { remote, local } = await splitImages(imageInputs, id);
     patch.idImageUrls = remote;
     localImages = local;
@@ -736,6 +746,7 @@ export const updateCustomer = async (id: string, data: any): Promise<void> => {
 
   let updates: Updates = {};
   for (const [field, value] of Object.entries(patch)) updates[`customers/${id}/${field}`] = value;
+  if (patch.idImageUrls) updates[`customers/${id}/idImageUrl`] = (patch.idImageUrls as string[])[0] ?? null;
   updates[`customers/${id}/updatedAt`] = now;
 
   const merged = { ...current, ...patch };
@@ -744,8 +755,22 @@ export const updateCustomer = async (id: string, data: any): Promise<void> => {
     now
   );
 
-  if (patch.amount !== undefined && patch.amount !== str(current.amount)) {
-    updates = { ...updates, ...(await amountChangeUpdates(id, patch.amount as string, current.paymentMode)) };
+  const amountChanged = patch.amount !== undefined && patch.amount !== str(current.amount);
+  const modeChanged = patch.paymentMode !== undefined && patch.paymentMode !== normalizePaymentMode(current.paymentMode);
+  if (amountChanged || modeChanged) {
+    updates = { ...updates, ...(await amountChangeUpdates(id, str(merged.amount), merged.paymentMode)) };
+  }
+
+  // Bookings keep a copy of the guest's name, mobile and party size for the live lists.
+  const copied: Record<string, unknown> = {};
+  if (patch.name !== undefined && patch.name !== str(current.name)) copied.guestName = patch.name || 'Guest';
+  if (patch.mobile !== undefined && patch.mobile !== str(current.mobile)) copied.mobile = patch.mobile;
+  if (patch.membersCount !== undefined && patch.membersCount !== Number(current.membersCount)) copied.membersCount = Number(patch.membersCount) || 1;
+  if (Object.keys(copied).length > 0) {
+    for (const b of await bookingsOfCustomer(id)) {
+      for (const [field, value] of Object.entries(copied)) updates[`bookings/${b.id}/${field}`] = value;
+      updates[`bookings/${b.id}/updatedAt`] = now;
+    }
   }
 
   await update(ref(rtdb), updates);
@@ -891,32 +916,18 @@ const customersByIds = async (ids: string[]): Promise<Record<string, any>> => {
   return Object.fromEntries(entries.filter(([, c]) => c));
 };
 
-export async function fetchBookingsEnriched(
-  limit: number = 50,
-  options?: { customersVal?: Record<string, any>; roomsVal?: Record<string, any> }
-): Promise<BookingEnriched[]> {
-  let bookings: BookingRecord[];
-  try {
-    bookings = snapToRecords((await get(query(ref(rtdb, 'bookings'), orderByKey(), limitToLast(limit)))).val());
-  } catch (err) {
-    console.warn('[fetchBookingsEnriched] Failed to load bookings:', err);
-    return [];
-  }
-
+/** Groups booking records into one list entry per stay (advance bookings are left out). */
+const toStays = (bookings: BookingRecord[], customers: Record<string, any>, rooms: RtdbRoom[]): BookingEnriched[] => {
   const today = localDay();
   // Advance bookings live in the Rooms tab, not in the Bookings list.
   const visible = bookings.filter(b => !(checkInDayOf(b) > today && normalizeBookingStatus(b.status) !== 'CHECKED_OUT'));
-
-  const [customers, rooms] = await Promise.all([
-    options?.customersVal ? Promise.resolve(options.customersVal) : customersByIds(visible.map(b => b.customerId)),
-    options?.roomsVal ? Promise.resolve(mapRooms(options.roomsVal)) : fetchAllRooms().catch(() => [] as RtdbRoom[]),
-  ]);
   const roomByNo = new Map(rooms.map(r => [normalizeRoomId(r.room_no), r]));
 
   const result: BookingEnriched[] = [];
   for (const stay of groupByStay(visible).values()) {
     const first = stay.reduce((a, b) => ((a.createdAt || 0) <= (b.createdAt || 0) ? a : b));
-    const customer = normalizeCustomer(first.customerId, customers[first.customerId] || {});
+    const known = customers[first.customerId];
+    const customer = normalizeCustomer(first.customerId, known || {});
     const { total } = bookingAmount(first);
     const roomNumbers = Array.from(new Set(stay.map(b => normalizeRoomId(b.roomNo)).filter(Boolean))).sort(compareRoomIds);
     const status = stay.some(isOpen) ? normalizeBookingStatus(stay.find(isOpen)!.status) : 'CHECKED_OUT';
@@ -934,7 +945,8 @@ export async function fetchBookingsEnriched(
       status,
       paymentMode,
       customer: {
-        name: customers[first.customerId] ? customer.name : first.guestName || 'Guest',
+        // Bookings carry a copy of the guest's name and mobile, so lists need no extra reads.
+        name: known ? customer.name : first.guestName || 'Guest',
         mobile: customer.mobile || first.mobile || '',
         father_name: customer.father_name,
         address: customer.address,
@@ -955,7 +967,100 @@ export async function fetchBookingsEnriched(
     });
   }
   return result.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+};
+
+export async function fetchBookingsEnriched(limit: number = RECENT_BOOKINGS): Promise<BookingEnriched[]> {
+  let bookings: BookingRecord[];
+  try {
+    bookings = snapToRecords((await get(query(ref(rtdb, 'bookings'), orderByKey(), limitToLast(limit)))).val());
+  } catch (err) {
+    console.warn('[fetchBookingsEnriched] Failed to load bookings:', err);
+    return [];
+  }
+  const [customers, rooms] = await Promise.all([
+    customersByIds(bookings.filter(b => !b.guestName).map(b => b.customerId)),
+    fetchAllRooms().catch(() => [] as RtdbRoom[]),
+  ]);
+  return toStays(bookings, customers, rooms);
 }
+
+/* ============================================================
+   LIVE LISTS (shared listeners)
+============================================================ */
+
+/**
+ * One live listener per query for the whole app, however many screens watch it.
+ * The first load downloads the result once; after that only changes stream in.
+ */
+const sharedQuery = <T>(makeQuery: () => Query, map: (val: any) => T) => {
+  let unsubscribe: (() => void) | null = null;
+  let last: T | null = null;
+  const watchers = new Set<(value: T) => void>();
+  const errorWatchers = new Set<(error: unknown) => void>();
+
+  return (callback: (value: T) => void, onError?: (error: unknown) => void) => {
+    watchers.add(callback);
+    if (onError) errorWatchers.add(onError);
+    if (!unsubscribe) {
+      unsubscribe = onValue(
+        makeQuery(),
+        snap => {
+          last = map(snap.val());
+          watchers.forEach(w => w(last!));
+        },
+        error => {
+          // A failed listener is dead; the next subscriber starts a fresh one.
+          unsubscribe = null;
+          last = null;
+          errorWatchers.forEach(w => w(error));
+        }
+      );
+    } else if (last) {
+      callback(last);
+    }
+    return () => {
+      watchers.delete(callback);
+      if (onError) errorWatchers.delete(onError);
+      if (watchers.size === 0 && unsubscribe) {
+        unsubscribe();
+        unsubscribe = null;
+        last = null;
+      }
+    };
+  };
+};
+
+/** How many of the latest bookings the Bookings tab keeps live. */
+export const RECENT_BOOKINGS = 60;
+
+/** The latest stays (Bookings tab), kept live: new bookings, checkouts and edits show up by themselves. */
+export const subscribeToRecentStays = sharedQuery(
+  () => query(ref(rtdb, 'bookings'), orderByKey(), limitToLast(RECENT_BOOKINGS)),
+  val => toStays(snapToRecords(val), {}, lastKnownRooms || [])
+);
+
+export type GuestListItem = { id: string; name: string; mobile: string; vehicleNumber: string; createdAt: number };
+
+/** The latest guests (Guests tab), kept live from the tiny search index (~100 bytes per guest). */
+export const subscribeToRecentGuests = sharedQuery(
+  () => query(ref(rtdb, 'customerIndex'), orderByKey(), limitToLast(80)),
+  (val): GuestListItem[] =>
+    Object.entries((val || {}) as Record<string, any>)
+      .filter(([, e]) => e && !e.deleted)
+      .map(([id, e]) => ({ id, name: e.n || 'Guest', mobile: e.m || '', vehicleNumber: e.v || '', createdAt: Number(e.t) || 0 }))
+      .sort((a, b) => b.createdAt - a.createdAt)
+);
+
+/** Revenue recorded on one day (YYYY-MM-DD), live. */
+export const subscribeToDayStats = (day: string, callback: (stats: { revenue: number; count: number }) => void) =>
+  onValue(
+    ref(rtdb, `stats/daily/${day}`),
+    snap => {
+      const v = snap.val() || {};
+      callback({ revenue: Number(v.revenue) || 0, count: Number(v.count) || 0 });
+    },
+    () => callback({ revenue: 0, count: 0 })
+  );
 
 const staySiblings = async (booking: BookingRecord): Promise<BookingRecord[]> => {
   if (booking.stayId) {
@@ -1069,22 +1174,61 @@ export const confirmCheckIn = async (bookingId: string, roomNo: string) => {
   await update(ref(rtdb), updates);
 };
 
-/** Moves the expected checkout of every open room in the stay to `newCheckOutDay` (YYYY-MM-DD). */
+/**
+ * First open booking of another stay that overlaps `inDay..outDay` in one of `roomNos`.
+ * A guest past their check-out date still holds the room until checked out.
+ */
+const findClash = async (roomNos: string[], inDay: string, outDay: string, ownIds: Set<string>) => {
+  const today = localDay();
+  const open = snapToRecords((await get(activeBookingsQuery())).val());
+  return open.find(o => {
+    if (ownIds.has(o.id) || !isOpen(o) || !roomNos.includes(normalizeRoomId(o.roomNo))) return false;
+    const oOut = checkOutDayOf(o) < today ? today : checkOutDayOf(o);
+    return checkInDayOf(o) <= outDay && oOut >= inDay;
+  });
+};
+
+/**
+ * Moves the expected checkout of every open room in the stay to `newCheckOutDay` (YYYY-MM-DD).
+ * Works both ways (extend or shorten) and refuses dates that clash with another booking.
+ */
 export const extendStay = async (bookingId: string, newCheckOutDay: string) => {
   const booking = await fetchBookingRecord(bookingId);
   if (!booking) throw new Error('Booking not found');
+  const inDay = checkInDayOf(booking);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(newCheckOutDay)) throw new Error('Pick a valid check-out date.');
+  if (inDay && newCheckOutDay < inDay) throw new Error('Check-out cannot be before check-in.');
+
+  const siblings = await staySiblings(booking);
+  const open = siblings.filter(isOpen);
+  if (open.length === 0) throw new Error('This stay is already checked out.');
+
+  const clash = await findClash(
+    open.map(b => normalizeRoomId(b.roomNo)),
+    inDay || newCheckOutDay,
+    newCheckOutDay,
+    new Set(siblings.map(b => b.id))
+  );
+  if (clash) {
+    throw new Error(
+      `Room ${normalizeRoomId(clash.roomNo)} is booked for ${clash.guestName || 'another guest'} from ${checkInDayOf(clash)}. Pick an earlier date or change rooms first.`
+    );
+  }
+
   const [y, m, d] = newCheckOutDay.split('-').map(Number);
   const newCheckOut = new Date(y, m - 1, d, 12, 0, 0).toISOString();
   const now = Date.now();
   const updates: Updates = {};
 
-  for (const b of (await staySiblings(booking)).filter(isOpen)) {
+  for (const b of open) {
     updates[`bookings/${b.id}/checkOutDate`] = newCheckOut;
     updates[`bookings/${b.id}/checkOutDay`] = newCheckOutDay;
     updates[`bookings/${b.id}/previousCheckOutDate`] = b.checkOutDate || '';
     updates[`bookings/${b.id}/extendedAt`] = now;
     updates[`bookings/${b.id}/updatedAt`] = now;
   }
+  updates[`customers/${booking.customerId}/checkOutDate`] = newCheckOut;
+  updates[`customers/${booking.customerId}/updatedAt`] = now;
   await update(ref(rtdb), updates);
 };
 
@@ -1108,20 +1252,8 @@ export const reassignBookingRooms = async (bookingId: string, newRoomNumbers: (s
   const editableIds = new Set(editable.map(b => b.id));
 
   // Conflicts: any other open booking in a target room whose dates overlap this stay.
-  const others = snapToRecords(
-    (await get(query(ref(rtdb, 'bookings'), orderByChild('checkOutDay'), startAt(inDay)))).val()
-  );
-  for (const roomNo of targetRooms) {
-    const clash = others.find(
-      o =>
-        !editableIds.has(o.id) &&
-        isOpen(o) &&
-        normalizeRoomId(o.roomNo) === roomNo &&
-        checkInDayOf(o) <= outDay &&
-        checkOutDayOf(o) >= inDay
-    );
-    if (clash) throw new Error(`Room ${roomNo} is already booked for overlapping dates.`);
-  }
+  const clash = await findClash(targetRooms, inDay, outDay, editableIds);
+  if (clash) throw new Error(`Room ${normalizeRoomId(clash.roomNo)} is already booked for overlapping dates.`);
 
   const now = Date.now();
   const startsNow = inDay <= localDay();
@@ -1133,8 +1265,28 @@ export const reassignBookingRooms = async (bookingId: string, newRoomNumbers: (s
     if (oldRoom && !targetRooms.includes(oldRoom)) freeRoom(updates, oldRoom, now);
   }
 
-  targetRooms.forEach((roomNo, i) => {
-    const existing = editable[i];
+  // Bookings keep their room when it is still wanted; the rest are moved, added or removed.
+  // The booking this was opened from always survives, so screens showing it stay valid.
+  const assigned = new Map<string, BookingRecord | undefined>();
+  const spare: BookingRecord[] = [];
+  for (const b of editable) {
+    const room = normalizeRoomId(b.roomNo);
+    if (targetRooms.includes(room) && !assigned.has(room)) assigned.set(room, b);
+    else spare.push(b);
+  }
+  spare.sort((a, b) => (a.id === bookingId ? -1 : b.id === bookingId ? 1 : 0));
+  for (const room of targetRooms) if (!assigned.has(room)) assigned.set(room, spare.shift());
+  const requestedDropped = spare.findIndex(b => b.id === bookingId);
+  if (requestedDropped >= 0) {
+    // Hand the first room to the requested booking and drop the one that held it instead.
+    const firstRoom = targetRooms[0];
+    const displaced = assigned.get(firstRoom);
+    assigned.set(firstRoom, spare[requestedDropped]);
+    spare.splice(requestedDropped, 1, ...(displaced ? [displaced] : []));
+  }
+
+  for (const roomNo of targetRooms) {
+    const existing = assigned.get(roomNo);
     const id = existing?.id ?? (push(ref(rtdb, 'bookings')).key as string);
     updatedBookingIds.push(id);
     if (existing) {
@@ -1145,8 +1297,8 @@ export const reassignBookingRooms = async (bookingId: string, newRoomNumbers: (s
       updates[`bookings/${id}`] = { ...template, id, roomNo, stayId: stayIdOf(booking), createdAt: now, updatedAt: now };
     }
     if (startsNow) occupyRoom(updates, roomNo, id, now);
-  });
-  editable.slice(targetRooms.length).forEach(b => (updates[`bookings/${b.id}`] = null));
+  }
+  spare.forEach(b => (updates[`bookings/${b.id}`] = null));
 
   updates[`customers/${booking.customerId}/selectedRoom`] = targetRooms.join(',');
   updates[`customers/${booking.customerId}/updatedAt`] = now;

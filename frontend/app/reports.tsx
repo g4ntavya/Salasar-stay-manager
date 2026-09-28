@@ -1,474 +1,274 @@
-import React, { useState, useEffect } from 'react';
-import {
-    View,
-    Text,
-    StyleSheet,
-    ScrollView,
-    TouchableOpacity,
-    ActivityIndicator,
-    Alert,
-} from 'react-native';
-import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import DateTimePicker from '@react-native-community/datetimepicker';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Alert, StyleSheet, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { DateField } from '../src/components/DateField';
 import { exportCsv } from '../src/utils/exportCsv';
 import { fetchReportData, normalizeBookingStatus } from '../src/utils/rtdbService';
-import { formatDate } from '../src/utils/dateHelper';
 import { TOTAL_ROOMS } from '../src/utils/roomConstants';
+import { localDay } from '../src/utils/date';
 import * as RevenueService from '../src/utils/RevenueService';
+import {
+  AppText,
+  Avatar,
+  Card,
+  Chip,
+  ChipRow,
+  EmptyState,
+  IconButton,
+  NavBar,
+  Screen,
+  Section,
+  Segmented,
+  SkeletonList,
+  StatTile,
+  colors,
+  formatRupees,
+  space,
+} from '../src/ui';
 
-type ReportTab = 'Revenue' | 'Rooms' | 'Bookings';
+type ReportTab = 'Revenue' | 'Occupancy' | 'Checkins';
+type Preset = '7D' | '30D' | 'MONTH' | 'LAST_MONTH' | 'CUSTOM';
+
+const startOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const presetRange = (p: Preset): [Date, Date] | null => {
+  const today = startOf(new Date());
+  if (p === '7D') return [new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6), today];
+  if (p === '30D') return [new Date(today.getFullYear(), today.getMonth(), today.getDate() - 29), today];
+  if (p === 'MONTH') return [new Date(today.getFullYear(), today.getMonth(), 1), today];
+  if (p === 'LAST_MONTH') return [new Date(today.getFullYear(), today.getMonth() - 1, 1), new Date(today.getFullYear(), today.getMonth(), 0)];
+  return null;
+};
+const fmt = (d: Date) => d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+const fmtDay = (day: string) => new Date(`${day}T12:00:00`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+const DAY = 86400000;
 
 const ReportsScreen = () => {
-    const router = useRouter();
-    const [activeTab, setActiveTab] = useState<ReportTab>('Revenue');
-    const [startDate, setStartDate] = useState(new Date(new Date().setDate(new Date().getDate() - 30)));
-    const [endDate, setEndDate] = useState(new Date());
-    const [showStartPicker, setShowStartPicker] = useState(false);
-    const [showEndPicker, setShowEndPicker] = useState(false);
-    const [loading, setLoading] = useState(false);
+  const [tab, setTab] = useState<ReportTab>('Revenue');
+  const [preset, setPreset] = useState<Preset>('30D');
+  const [[startDate, endDate], setRange] = useState<[Date, Date]>(presetRange('30D')!);
+  const [loading, setLoading] = useState(false);
+  const [checkedOut, setCheckedOut] = useState<any[]>([]);
+  const [checkedIn, setCheckedIn] = useState<any[]>([]);
 
-    // Stats
-    const [stats, setStats] = useState({
-        totalRevenue: 0,
-        cashRevenue: 0,
-        upiRevenue: 0,
-        totalBookings: 0,
-        cancelledBookings: 0,
-        occupancyRate: 0,
-        revenueByDay: [] as { date: string, amount: number, count?: number }[],
-        bookings: [] as any[],
+  // Two indexed range queries per date range; switching tabs reuses the data.
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchReportData(startDate, endDate)
+      .then(res => {
+        if (cancelled) return;
+        setCheckedOut(res.checkedOut);
+        setCheckedIn(res.checkedIn);
+      })
+      .catch(err => {
+        console.error('Error generating report:', err);
+        Alert.alert('Could not load report', 'Check your connection and try again.');
+      })
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [startDate, endDate]);
+
+  const revenue = useMemo(() => RevenueService.getLiveRevenueReport(checkedOut, startDate, endDate), [checkedOut, startDate, endDate]);
+
+  const occupancy = useMemo(() => {
+    const rangeStart = startOf(startDate).getTime();
+    const rangeEnd = startOf(endDate).getTime() + DAY;
+    const days = Math.round((rangeEnd - rangeStart) / DAY);
+    const live = checkedIn.filter(b => normalizeBookingStatus(b.status) !== 'CANCELLED');
+    let roomNights = 0;
+    let stayNights = 0;
+    const stays = new Set<string>();
+    for (const b of live) {
+      const a = startOf(new Date(b.checkInDate)).getTime();
+      const z = startOf(new Date(b.check_out_actual || b.checkOutDate)).getTime();
+      if (isNaN(a) || isNaN(z)) continue;
+      const nights = Math.max(1, Math.round((z - a) / DAY));
+      roomNights += Math.max(0, Math.min(rangeEnd, a + nights * DAY) - Math.max(rangeStart, a)) / DAY;
+      const key = b.stayId || `${b.customerId}_${b.checkInDay}`;
+      if (!stays.has(key)) {
+        stays.add(key);
+        stayNights += nights;
+      }
+    }
+    const capacity = TOTAL_ROOMS * days;
+    return {
+      rate: capacity ? Math.min(100, Math.round((roomNights / capacity) * 100)) : 0,
+      roomNights: Math.round(roomNights),
+      days,
+      avgStay: stays.size ? stayNights / stays.size : 0,
+      checkins: stays.size,
+      checkedOutCount: live.filter(b => normalizeBookingStatus(b.status) === 'CHECKED_OUT').length,
+      cancelled: checkedIn.filter(b => normalizeBookingStatus(b.status) === 'CANCELLED').length,
+    };
+  }, [checkedIn, startDate, endDate]);
+
+  const byDay = useMemo(() => {
+    const map = new Map<string, { amount: number; count: number }>();
+    revenue.bookings.forEach(b => {
+      const d = map.get(b.checkoutDate) || { amount: 0, count: 0 };
+      d.amount += b.amount;
+      d.count += 1;
+      map.set(b.checkoutDate, d);
     });
+    return Array.from(map.entries()).sort((a, b) => b[0].localeCompare(a[0]));
+  }, [revenue.bookings]);
 
-    // Report data depends only on the date range; switching tabs reuses it.
-    useEffect(() => {
-        generateReport();
-    }, [startDate, endDate]);
+  const choosePreset = (p: Preset) => {
+    setPreset(p);
+    const r = presetRange(p);
+    if (r) setRange(r);
+  };
 
-    const generateReport = async () => {
-        setLoading(true);
-        try {
-            // Two indexed range queries: stays checked out in range (revenue) and checked in (occupancy).
-            const { checkedOut, checkedIn } = await fetchReportData(startDate, endDate);
+  const handleExportCSV = async () => {
+    if (revenue.bookings.length === 0) {
+      Alert.alert('Nothing to export', 'There are no checked-out stays in this period.');
+      return;
+    }
+    const q = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    let csv = 'Checkout Date,Guest Name,Mobile,Room,Amount,Cash,UPI,Entered As\n';
+    revenue.bookings.forEach(b => {
+      csv += `${b.checkoutDate},${q(b.guestName)},${q(b.mobile)},${q(b.room)},${b.amount},${b.cash},${b.upi},${q(b.amountRaw)}\n`;
+    });
+    await exportCsv(csv, `Revenue_${localDay(startDate)}_to_${localDay(endDate)}`, { dialogTitle: 'Save report', showSuccessAlert: true });
+  };
 
-            const liveMetrics = RevenueService.getLiveRevenueReport(checkedOut, startDate, endDate);
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }} edges={['top']}>
+      <NavBar title="Reports" subtitle={`${fmt(startDate)} – ${fmt(endDate)}`} right={<IconButton icon="download-outline" onPress={handleExportCSV} accessibilityLabel="Export revenue as CSV" />} />
+      <Screen edges={[]} contentStyle={{ paddingBottom: space.huge }}>
+        <ChipRow style={{ marginBottom: space.md }}>
+          {([
+            ['7D', 'Last 7 days'],
+            ['30D', 'Last 30 days'],
+            ['MONTH', 'This month'],
+            ['LAST_MONTH', 'Last month'],
+            ['CUSTOM', 'Custom'],
+          ] as [Preset, string][]).map(([p, label]) => (
+            <Chip key={p} label={label} selected={preset === p} onPress={() => choosePreset(p)} />
+          ))}
+        </ChipRow>
 
-            const validForOccupancy = RevenueService.filterBookingsByDateRange(checkedIn, startDate, endDate, null);
-            const diffDays = Math.ceil(Math.abs(endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-            const totalAvailableRoomNights = TOTAL_ROOMS * diffDays;
-            const occupancyVal = totalAvailableRoomNights > 0
-                ? Math.min(100, Math.floor((validForOccupancy.length / totalAvailableRoomNights) * 100))
-                : 0;
+        {preset === 'CUSTOM' ? (
+          <View style={styles.pair}>
+            <DateField label="From" value={startDate} maximumDate={endDate} onChange={d => setRange(([, e]) => [startOf(d), e])} style={{ flex: 1 }} />
+            <DateField label="To" value={endDate} minimumDate={startDate} maximumDate={new Date()} onChange={d => setRange(([st]) => [st, startOf(d)])} style={{ flex: 1 }} />
+          </View>
+        ) : null}
 
-            const cancelledCount = checkedIn.filter(b => normalizeBookingStatus(b.status) === 'CANCELLED').length;
+        <Segmented
+          value={tab}
+          onChange={setTab}
+          options={[
+            { value: 'Revenue', label: 'Revenue' },
+            { value: 'Occupancy', label: 'Occupancy' },
+            { value: 'Checkins', label: 'Check-ins' },
+          ]}
+          style={{ marginBottom: space.lg }}
+        />
 
-            setStats({
-                totalRevenue: liveMetrics.totalRevenue,
-                cashRevenue: liveMetrics.cashRevenue,
-                upiRevenue: liveMetrics.upiRevenue,
-                totalBookings: liveMetrics.totalBookings,
-                cancelledBookings: cancelledCount,
-                occupancyRate: occupancyVal,
-                revenueByDay: [], // Simplified to follow the 'no analytics' rule
-                bookings: liveMetrics.bookings, // This list matches the Bookings tab grouping
-            });
-        } catch (error) {
-            console.error('Error generating report:', error);
-            Alert.alert('Error', 'Failed to generate report data.');
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const handleExportCSV = async () => {
-        const isRevenue = activeTab === 'Revenue';
-        const dataToExport = isRevenue ? stats.bookings : stats.revenueByDay;
-
-        if (dataToExport.length === 0) {
-            Alert.alert('No Data', 'There is no data to export for the selected period.');
-            return;
-        }
-
-        // Build CSV content
-        let csvContent = isRevenue
-            ? "Checkout Date,Guest Name,Mobile,Room,Amount,Cash,UPI,Entered As\n"
-            : "Date,Value\n";
-
-        if (isRevenue) {
-            const q = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-            dataToExport.forEach(b => {
-                csvContent += `${b.checkoutDate},${q(b.guestName)},${q(b.mobile)},${q(b.room)},${b.amount},${b.cash},${b.upi},${q(b.amountRaw)}\n`;
-            });
-        } else {
-            dataToExport.forEach(day => {
-                csvContent += `${day.date},${day.amount}\n`;
-            });
-        }
-
-        // Generate filename
-        const dateStr = formatDate(startDate.toISOString()).replace(/\//g, '-');
-        const fileName = `Report_${activeTab}_${dateStr}`;
-
-        // Use the cross-platform export utility
-        await exportCsv(csvContent, fileName, {
-            dialogTitle: 'Save Report',
-            showSuccessAlert: true
-        });
-    };
-
-    const renderKPI = (label: string, value: string | number, icon: any, color: string) => (
-        <View style={styles.kpiCard}>
-            <View style={[styles.kpiIcon, { backgroundColor: color + '20' }]}>
-                <Ionicons name={icon} size={24} color={color} />
-            </View>
-            <View>
-                <Text style={styles.kpiValue}>{value}</Text>
-                <Text style={styles.kpiLabel}>{label}</Text>
-            </View>
-        </View>
-    );
-
-    return (
-        <View style={styles.container}>
-            <View style={styles.navBar}>
-                <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-                    <Ionicons name="arrow-back" size={24} color="#1f2937" />
-                </TouchableOpacity>
-                <Text style={styles.navTitle}>Reports</Text>
-                <TouchableOpacity onPress={handleExportCSV} style={styles.exportButton}>
-                    <Ionicons name="download-outline" size={24} color="#dc2626" />
-                </TouchableOpacity>
-            </View>
-
-            <View style={styles.tabBar}>
-                {(['Revenue', 'Rooms', 'Bookings'] as ReportTab[]).map(tab => (
-                    <TouchableOpacity
-                        key={tab}
-                        style={[styles.tab, activeTab === tab && styles.activeTab]}
-                        onPress={() => setActiveTab(tab)}
-                    >
-                        <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>{tab}</Text>
-                    </TouchableOpacity>
-                ))}
-            </View>
-
-            <View style={styles.filterContainer}>
-                <TouchableOpacity style={styles.dateSelector} onPress={() => setShowStartPicker(true)}>
-                    <Text style={styles.dateLabel}>From</Text>
-                    <Text style={styles.dateValue}>{formatDate(startDate.toISOString())}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.dateSelector} onPress={() => setShowEndPicker(true)}>
-                    <Text style={styles.dateLabel}>To</Text>
-                    <Text style={styles.dateValue}>{formatDate(endDate.toISOString())}</Text>
-                </TouchableOpacity>
-            </View>
-
-            {showStartPicker && (
-                <DateTimePicker
-                    value={startDate}
-                    mode="date"
-                    onChange={(event, date) => {
-                        setShowStartPicker(false);
-                        if (date) setStartDate(date);
-                    }}
-                />
-            )}
-            {showEndPicker && (
-                <DateTimePicker
-                    value={endDate}
-                    mode="date"
-                    onChange={(event, date) => {
-                        setShowEndPicker(false);
-                        if (date) setEndDate(date);
-                    }}
-                />
-            )}
-
-            {loading ? (
-                <View style={styles.center}>
-                    <ActivityIndicator size="large" color="#dc2626" />
+        {loading ? (
+          <SkeletonList count={3} height={90} />
+        ) : tab === 'Revenue' ? (
+          <>
+            <Card style={{ marginBottom: space.md }}>
+              <AppText variant="caption" tone="soft">
+                Total revenue · {revenue.totalBookings} stay{revenue.totalBookings === 1 ? '' : 's'} checked out
+              </AppText>
+              <AppText variant="display" style={{ marginTop: space.xs }}>
+                {formatRupees(revenue.totalRevenue)}
+              </AppText>
+              <View style={styles.split}>
+                <View style={[styles.splitBar, { flex: Math.max(revenue.cashRevenue, 0.0001), backgroundColor: colors.gold }]} />
+                <View style={[styles.splitBar, { flex: Math.max(revenue.upiRevenue, 0.0001), backgroundColor: colors.brand }]} />
+              </View>
+              <View style={styles.pair}>
+                <View style={{ flex: 1 }}>
+                  <AppText variant="caption" tone="muted">
+                    Cash
+                  </AppText>
+                  <AppText variant="bodyStrong">{formatRupees(revenue.cashRevenue)}</AppText>
                 </View>
+                <View style={{ flex: 1, alignItems: 'flex-end' }}>
+                  <AppText variant="caption" tone="muted">
+                    UPI
+                  </AppText>
+                  <AppText variant="bodyStrong">{formatRupees(revenue.upiRevenue)}</AppText>
+                </View>
+              </View>
+            </Card>
+
+            {revenue.bookings.length === 0 ? (
+              <Card>
+                <EmptyState icon="receipt-outline" title="No checkouts" message="No stays were checked out in this period." style={{ paddingVertical: space.xl }} />
+              </Card>
             ) : (
-                <ScrollView contentContainerStyle={styles.content}>
-                    <View style={styles.kpiGrid}>
-                        {activeTab === 'Revenue' && (
-                            <>
-                                {renderKPI('Total Revenue', `₹${stats.totalRevenue.toLocaleString('en-IN')}`, 'cash', '#10b981')}
-                                <View style={{ width: '100%', alignItems: 'center', marginBottom: 4 }}>
-                                    <Text style={{ fontSize: 12, color: '#4b5563' }}>
-                                        Cash ₹{stats.cashRevenue.toLocaleString('en-IN')}  ·  UPI ₹{stats.upiRevenue.toLocaleString('en-IN')}
-                                    </Text>
-                                </View>
-                                <View style={{ width: '100%', alignItems: 'center', marginBottom: 10 }}>
-                                    <Text style={{ fontSize: 10, color: '#9ca3af' }}>Found {stats.bookings.length} checked-out bookings for this period</Text>
-                                </View>
-                            </>
-                        )}
-                        {activeTab === 'Rooms' && (
-                            <>
-                                {renderKPI('Occupancy', `${stats.occupancyRate}%`, 'bed', '#f59e0b')}
-                                {renderKPI('Total Rooms', TOTAL_ROOMS, 'home', '#6366f1')}
-                                {renderKPI('Avg Stay', '2.4 days', 'time', '#ec4899')}
-                            </>
-                        )}
-                        {activeTab === 'Bookings' && (
-                            <>
-                                {renderKPI('Total Bookings', stats.totalBookings, 'calendar', '#3b82f6')}
-                                {renderKPI('Cancelled', stats.cancelledBookings, 'close-circle', '#ef4444')}
-                                {renderKPI('Confirm Rate', '92%', 'checkmark-done', '#10b981')}
-                            </>
-                        )}
-                    </View>
-
-
-                    <View style={styles.tableCard}>
-                        <Text style={styles.tableTitle}>{activeTab === 'Revenue' ? 'Individual Bookings' : 'Daily Summary'}</Text>
-                        <View style={styles.tableHeader}>
-                            <Text style={[styles.th, { flex: 1.5 }]}>Date</Text>
-                            <Text style={[styles.th, { flex: 2 }]}>{activeTab === 'Revenue' ? 'Guest / Room' : 'Detail'}</Text>
-                            <Text style={[styles.th, { textAlign: 'right' }]}>Amount</Text>
+              byDay.map(([day, totals]) => (
+                <Section key={day} title={fmtDay(day)} caption={`${totals.count} stay${totals.count === 1 ? '' : 's'} · ${formatRupees(totals.amount)}`} style={{ marginBottom: space.lg }}>
+                  <Card padded={false}>
+                    {revenue.bookings
+                      .filter(b => b.checkoutDate === day)
+                      .map((b, i) => (
+                        <View key={b.id} style={[styles.row, i > 0 && styles.rowLine]}>
+                          <Avatar name={b.guestName} size={38} />
+                          <View style={{ flex: 1 }}>
+                            <AppText variant="bodyStrong" numberOfLines={1}>
+                              {b.guestName}
+                            </AppText>
+                            <AppText variant="caption" tone="muted" numberOfLines={1}>
+                              Room {b.room}
+                              {b.cash > 0 && b.upi > 0 ? ` · Cash ${formatRupees(b.cash)} + UPI ${formatRupees(b.upi)}` : b.upi > 0 ? ' · UPI' : ' · Cash'}
+                            </AppText>
+                          </View>
+                          <AppText variant="bodyStrong">{formatRupees(b.amount)}</AppText>
                         </View>
-                        {activeTab === 'Revenue' ? (
-                            stats.bookings.map((b, i) => (
-                                <View key={i} style={styles.tableRow}>
-                                    <View style={{ flex: 1.5 }}>
-                                        <Text style={styles.td}>{formatDate(b.checkoutDate || b.date)}</Text>
-                                    </View>
-                                    <View style={{ flex: 2 }}>
-                                        <Text style={[styles.td, { fontWeight: '600' }]}>{b.guestName || 'Guest'}</Text>
-                                        <Text style={[styles.td, { fontSize: 11, color: '#6b7280' }]}>Room {b.room}</Text>
-                                    </View>
-                                    <View style={{ flex: 1 }}>
-                                        <Text style={[styles.td, { textAlign: 'right', fontWeight: 'bold', color: '#10b981' }]}>
-                                            ₹{Number(b.amount || 0).toLocaleString()}
-                                        </Text>
-                                    </View>
-                                </View>
-                            ))
-                        ) : (
-                            stats.revenueByDay.slice(-20).reverse().map((day, i) => (
-                                <View key={i} style={styles.tableRow}>
-                                    <Text style={[styles.td, { flex: 1.5 }]}>{formatDate(day.date)}</Text>
-                                    <Text style={[styles.td, { flex: 2 }]}>Daily Aggregate</Text>
-                                    <Text style={[styles.td, { textAlign: 'right' }]}>
-                                        {activeTab === 'Rooms' ? `${day.count || 0} Rooms` : `₹${day.amount.toLocaleString()}`}
-                                    </Text>
-                                </View>
-                            ))
-                        )}
-                    </View>
-                </ScrollView>
+                      ))}
+                  </Card>
+                </Section>
+              ))
             )}
-        </View>
-    );
+          </>
+        ) : tab === 'Occupancy' ? (
+          <>
+            <View style={styles.tiles}>
+              <StatTile label="Occupancy" value={`${occupancy.rate}%`} icon="bed-outline" hint={`${TOTAL_ROOMS} rooms × ${occupancy.days} days`} style={styles.tile} />
+              <StatTile label="Room-nights" value={occupancy.roomNights} icon="moon-outline" hint="Sold in this period" accent={colors.gold} style={styles.tile} />
+            </View>
+            <View style={styles.tiles}>
+              <StatTile label="Average stay" value={occupancy.avgStay ? `${occupancy.avgStay.toFixed(1)} n` : '—'} icon="time-outline" hint="Nights per stay" accent={colors.info} style={styles.tile} />
+              <StatTile label="Stays started" value={occupancy.checkins} icon="log-in-outline" hint="Check-ins in period" accent={colors.success} style={styles.tile} />
+            </View>
+            <AppText variant="caption" tone="muted" style={{ marginTop: space.md }}>
+              Based on stays that started in this period.
+            </AppText>
+          </>
+        ) : (
+          <>
+            <View style={styles.tiles}>
+              <StatTile label="Check-ins" value={occupancy.checkins} icon="log-in-outline" hint="Stays started" accent={colors.success} style={styles.tile} />
+              <StatTile label="Checked out" value={revenue.totalBookings} icon="log-out-outline" hint="Stays completed" accent={colors.brand} style={styles.tile} />
+            </View>
+            <View style={styles.tiles}>
+              <StatTile label="Cancelled" value={occupancy.cancelled} icon="close-circle-outline" hint="In this period" accent={colors.danger} style={styles.tile} />
+              <StatTile label="Avg. revenue" value={formatRupees(revenue.totalBookings ? revenue.totalRevenue / revenue.totalBookings : 0)} icon="wallet-outline" hint="Per completed stay" accent={colors.gold} style={styles.tile} />
+            </View>
+          </>
+        )}
+
+      </Screen>
+    </SafeAreaView>
+  );
 };
 
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#f9fafb',
-    },
-    navBar: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        paddingTop: 60,
-        paddingBottom: 16,
-        paddingHorizontal: 16,
-        backgroundColor: '#fff',
-        borderBottomWidth: 1,
-        borderBottomColor: '#e5e7eb',
-    },
-    backButton: {
-        marginRight: 16,
-    },
-    navTitle: {
-        flex: 1,
-        fontSize: 20,
-        fontWeight: 'bold',
-        color: '#1f2937',
-    },
-    exportButton: {
-        padding: 4,
-    },
-    tabBar: {
-        flexDirection: 'row',
-        backgroundColor: '#fff',
-        paddingHorizontal: 16,
-        borderBottomWidth: 1,
-        borderBottomColor: '#e5e7eb',
-    },
-    tab: {
-        paddingVertical: 12,
-        marginRight: 24,
-        borderBottomWidth: 2,
-        borderBottomColor: 'transparent',
-    },
-    activeTab: {
-        borderBottomColor: '#dc2626',
-    },
-    tabText: {
-        fontSize: 14,
-        fontWeight: '500',
-        color: '#6b7280',
-    },
-    activeTabText: {
-        color: '#dc2626',
-    },
-    filterContainer: {
-        flexDirection: 'row',
-        backgroundColor: '#fff',
-        padding: 16,
-        gap: 12,
-    },
-    dateSelector: {
-        flex: 1,
-        borderWidth: 1,
-        borderColor: '#e5e7eb',
-        borderRadius: 8,
-        padding: 10,
-    },
-    dateLabel: {
-        fontSize: 10,
-        color: '#9ca3af',
-        textTransform: 'uppercase',
-    },
-    dateValue: {
-        fontSize: 14,
-        color: '#1f2937',
-        fontWeight: '600',
-        marginTop: 2,
-    },
-    content: {
-        padding: 16,
-    },
-    kpiGrid: {
-        flexDirection: 'row',
-        flexWrap: 'wrap',
-        gap: 12,
-        marginBottom: 20,
-    },
-    kpiCard: {
-        backgroundColor: '#fff',
-        borderRadius: 12,
-        padding: 16,
-        width: '48%',
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 12,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 1 },
-        shadowOpacity: 0.1,
-        shadowRadius: 2,
-        elevation: 2,
-    },
-    kpiIcon: {
-        width: 44,
-        height: 44,
-        borderRadius: 22,
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    kpiValue: {
-        fontSize: 16,
-        fontWeight: 'bold',
-        color: '#1f2937',
-    },
-    kpiLabel: {
-        fontSize: 12,
-        color: '#6b7280',
-    },
-    chartContainer: {
-        backgroundColor: '#fff',
-        borderRadius: 12,
-        padding: 16,
-        marginBottom: 20,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 1 },
-        shadowOpacity: 0.1,
-        shadowRadius: 2,
-        elevation: 2,
-    },
-    chartTitle: {
-        fontSize: 16,
-        fontWeight: 'bold',
-        color: '#1f2937',
-        marginBottom: 20,
-    },
-    barChart: {
-        flexDirection: 'row',
-        height: 150,
-        alignItems: 'flex-end',
-        justifyContent: 'space-between',
-        paddingHorizontal: 10,
-    },
-    barItem: {
-        alignItems: 'center',
-        width: '12%',
-    },
-    bar: {
-        width: '100%',
-        backgroundColor: '#dc262620',
-        borderTopLeftRadius: 4,
-        borderTopRightRadius: 4,
-        borderWidth: 1,
-        borderColor: '#dc2626',
-        borderStyle: 'dashed',
-    },
-    barValue: {
-        fontSize: 8,
-        color: '#9ca3af',
-        marginBottom: 4,
-    },
-    barLabel: {
-        fontSize: 10,
-        color: '#6b7280',
-        marginTop: 8,
-    },
-    tableCard: {
-        backgroundColor: '#fff',
-        borderRadius: 12,
-        padding: 16,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 1 },
-        shadowOpacity: 0.1,
-        shadowRadius: 2,
-        elevation: 2,
-    },
-    tableTitle: {
-        fontSize: 16,
-        fontWeight: 'bold',
-        color: '#1f2937',
-        marginBottom: 16,
-    },
-    tableHeader: {
-        flexDirection: 'row',
-        paddingBottom: 8,
-        borderBottomWidth: 1,
-        borderBottomColor: '#f3f4f6',
-        marginBottom: 8,
-    },
-    th: {
-        flex: 1,
-        fontSize: 12,
-        fontWeight: 'bold',
-        color: '#9ca3af',
-    },
-    tableRow: {
-        flexDirection: 'row',
-        paddingVertical: 12,
-        borderBottomWidth: 1,
-        borderBottomColor: '#f9fafb',
-    },
-    td: {
-        flex: 1,
-        fontSize: 14,
-        color: '#4b5563',
-    },
-    center: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
+  pair: { flexDirection: 'row', gap: space.md },
+  split: { flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden', gap: 3, marginTop: space.lg, marginBottom: space.md },
+  splitBar: { height: 8, borderRadius: 4 },
+  tiles: { flexDirection: 'row', gap: space.md, marginBottom: space.md },
+  tile: { borderWidth: 1, borderColor: colors.line },
+  row: { flexDirection: 'row', alignItems: 'center', gap: space.md, paddingHorizontal: space.lg, paddingVertical: space.md },
+  rowLine: { borderTopWidth: StyleSheet.hairlineWidth * 2, borderTopColor: colors.line },
 });
 
 export default ReportsScreen;

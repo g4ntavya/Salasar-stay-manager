@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { View, Text, StyleSheet, ScrollView, Alert, Image, TextInput, TouchableOpacity, ActivityIndicator, RefreshControl } from 'react-native';
+import { View, StyleSheet, ScrollView, Alert, Image, RefreshControl, Linking, Modal, Pressable } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import LoadingSpinner from '../../src/components/LoadingSpinner';
 import { fetchCustomerById, updateCustomer, deleteCustomer } from '../../src/utils/rtdbService';
@@ -7,6 +8,22 @@ import { useAuth } from '../../src/context/AuthContext';
 import { getCached, setCached, getCachedItemSync } from '../../src/utils/cache';
 import { mediaImageSource } from '../../src/utils/imageStorage';
 import { Ionicons } from '@expo/vector-icons';
+import { parseAmount, describeAmount } from '../../src/utils/amount';
+import {
+  AppText,
+  Avatar,
+  Button,
+  Card,
+  Field,
+  IconButton,
+  InfoRow,
+  NavBar,
+  PressableScale,
+  colors,
+  radius,
+  space,
+  GUTTER,
+} from '../../src/ui';
 
 const IMAGE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000; // 3 months
 
@@ -25,6 +42,7 @@ const CustomerDetailScreen = () => {
   const [customer, setCustomer] = useState<any>(initialCustomer);
   const [imagesLoading, setImagesLoading] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [viewerUri, setViewerUri] = useState<string | null>(null);
   const { profile } = useAuth();
   // Roles come only from the database (users/{uid}), enforced by security rules.
   const isAdmin = profile?.role === 'ADMIN';
@@ -249,250 +267,166 @@ const CustomerDetailScreen = () => {
     return <LoadingSpinner message="Loading customer..." />;
   }
 
+
+  const since = (() => {
+    const ts = typeof customer.createdAt === 'number' ? customer.createdAt : Date.parse(customer.checkInDate || '');
+    return ts ? new Date(ts).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) : '';
+  })();
+  const amount = parseAmount(customer.amount, customer.paymentMode || 'CASH');
+  const set = (key: string) => (v: string) => setCustomer({ ...customer, [key]: v });
+
   return (
-    <ScrollView
-      contentContainerStyle={styles.container}
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-      }
-    >
-      <Text style={styles.title}>Customer Detail</Text>
-      <View style={styles.card}>
-        <InfoInput label="Name" value={customer.name} editable={isAdmin && editing} onChange={(v) => setCustomer({ ...customer, name: v })} />
-        <InfoInput label="Father's Name" value={customer.father_name} editable={isAdmin && editing} onChange={(v) => setCustomer({ ...customer, father_name: v })} />
-        <InfoInput label="Mobile" value={customer.mobile} editable={isAdmin && editing} onChange={(v) => setCustomer({ ...customer, mobile: v })} />
-        <InfoInput label="Amount" value={customer.amount} editable={isAdmin && editing} onChange={(v) => setCustomer({ ...customer, amount: v })} />
-        <InfoInput label="Address" value={customer.address} editable={isAdmin && editing} onChange={(v) => setCustomer({ ...customer, address: v })} />
-        <InfoInput label="Members" value={customer.membersCount} editable={isAdmin && editing} onChange={(v) => setCustomer({ ...customer, membersCount: v })} />
-        <InfoInput label="Vehicle Number" value={customer.vehicleNumber} editable={isAdmin && editing} onChange={(v) => setCustomer({ ...customer, vehicleNumber: v })} />
-        <InfoInput label="ID Type" value={customer.id_type} editable={isAdmin && editing} onChange={(v) => setCustomer({ ...customer, id_type: v })} />
-        <InfoInput label="ID Number" value={customer.id_number} editable={isAdmin && editing} onChange={(v) => setCustomer({ ...customer, id_number: v })} keyboardType="default" />
-
-        {/* ID Images Section */}
-        {(() => {
-          // 🔥 ENTERPRISE FIX: Display images for BOTH Admin and Staff
-          const hasImages = displayImageUrls.length > 0 || displayPrimaryImage;
-
-          if (hasImages) {
-            const urls = displayImageUrls.length > 0 ? displayImageUrls : [displayPrimaryImage!];
-            return (
-              <View style={styles.imageWrapper}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Text style={styles.imageLabel}>ID Images ({urls.length})</Text>
-                  {imagesLoading && <ActivityIndicator size="small" color="#dc2626" style={{ marginLeft: 8 }} />}
-                </View>
-                {urls.map((uri: string, idx: number) => (
-                  <View key={idx} style={styles.imageContainer}>
-                    <Image
-                      source={mediaImageSource(uri)}
-                      style={styles.idImage}
-                    />
-                    <TouchableOpacity
-                      style={{ position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(255,255,255,0.8)', borderRadius: 20, padding: 8, zIndex: 10 }}
-                      onPress={() => fetchFreshData()}
-                    >
-                      <Ionicons name="refresh" size={16} color="#dc2626" />
-                    </TouchableOpacity>
-                  </View>
-                ))}
-              </View>
-            );
-          }
-
-          if (imagesLoading) {
-            return (
-              <View style={styles.imageWrapper}>
-                <Text style={styles.imageLabel}>ID Image</Text>
-                <View style={styles.imagePlaceholder}>
-                  <ActivityIndicator size="small" color="#6b7280" />
-                  <Text style={styles.imagePlaceholderText}>Fetching images...</Text>
-                </View>
-              </View>
-            );
-          }
-
-          return (
-            <View style={styles.imageWrapper}>
-              <View style={styles.imagePlaceholder}>
-                <TouchableOpacity onPress={() => fetchFreshData()} style={{ alignItems: 'center' }}>
-                  <Ionicons name="image-outline" size={32} color="#d1d5db" />
-                  <Text style={styles.imagePlaceholderText}>No ID images available</Text>
-                  <Text style={{ fontSize: 10, color: '#9ca3af', marginTop: 4 }}>Tap to retry</Text>
-                </TouchableOpacity>
-              </View>
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <NavBar
+        title="Guest profile"
+        right={
+          isAdmin ? (
+            editing ? (
+              <IconButton icon="close" onPress={() => { setEditing(false); fetchFreshData(); }} accessibilityLabel="Cancel editing" />
+            ) : (
+              <IconButton icon="create-outline" onPress={() => setEditing(true)} accessibilityLabel="Edit guest" />
+            )
+          ) : undefined
+        }
+      />
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.brand} colors={[colors.brand]} />}
+      >
+        <Card style={styles.card}>
+          <View style={styles.heroTop}>
+            <Avatar name={customer.name} size={64} />
+            <View style={{ flex: 1 }}>
+              <AppText variant="title2" numberOfLines={2}>
+                {customer.name || 'Guest'}
+              </AppText>
+              {since ? (
+                <AppText variant="footnote" tone="muted" style={{ marginTop: 2 }}>
+                  Guest since {since}
+                </AppText>
+              ) : null}
             </View>
-          );
-        })()}
-      </View>
+            {customer.mobile ? (
+              <IconButton icon="call" variant="tonal" accessibilityLabel={`Call ${customer.mobile}`} onPress={() => Linking.openURL(`tel:${customer.mobile}`)} />
+            ) : null}
+          </View>
+        </Card>
 
-      {isAdmin ? (
-        <View style={styles.actionsRow}>
-          {!editing ? (
-            <TouchableOpacity style={[styles.actionBtn, styles.editBtn]} onPress={() => setEditing(true)}>
-              <Text style={styles.actionText}>Edit</Text>
-            </TouchableOpacity>
+        <Card style={styles.card}>
+          <AppText variant="overline" tone="muted" style={{ marginBottom: editing ? space.md : space.xs }}>
+            {editing ? 'Edit details' : 'Details'}
+          </AppText>
+          {editing ? (
+            <>
+              <Field label="Name" value={customer.name || ''} onChangeText={set('name')} autoCapitalize="words" />
+              <Field label="Mobile" value={customer.mobile || ''} onChangeText={set('mobile')} keyboardType="phone-pad" />
+              <Field label="Father's name" value={customer.father_name || ''} onChangeText={set('father_name')} autoCapitalize="words" />
+              <Field label="Address" value={customer.address || ''} onChangeText={set('address')} />
+              <View style={styles.pair}>
+                <Field label="Members" value={String(customer.membersCount ?? '')} onChangeText={set('membersCount')} keyboardType="number-pad" style={{ flex: 1 }} />
+                <Field label="Vehicle" value={customer.vehicleNumber || ''} onChangeText={set('vehicleNumber')} autoCapitalize="characters" style={{ flex: 1 }} />
+              </View>
+              <View style={styles.pair}>
+                <Field label="ID type" value={customer.id_type || ''} onChangeText={set('id_type')} style={{ flex: 1 }} />
+                <Field label="ID number" value={customer.id_number || ''} onChangeText={set('id_number')} style={{ flex: 1.4 }} />
+              </View>
+              <Field
+                label="Amount"
+                value={customer.amount || ''}
+                onChangeText={set('amount')}
+                hint={customer.amount ? (amount.total > 0 ? `Total ${describeAmount(amount)} · revenue updates on save` : 'Use numbers like 1500 or 1000p, 500c') : undefined}
+                hintTone={customer.amount && amount.total <= 0 ? 'danger' : 'muted'}
+                style={{ marginBottom: 0 }}
+              />
+            </>
           ) : (
-            <TouchableOpacity style={[styles.actionBtn, styles.saveBtn]} onPress={handleSave}>
-              <Text style={styles.actionText}>Save</Text>
-            </TouchableOpacity>
+            <>
+              <InfoRow icon="call-outline" label="Mobile" value={customer.mobile} />
+              <InfoRow icon="person-outline" label="Father's name" value={customer.father_name} />
+              <InfoRow icon="location-outline" label="Address" value={customer.address} />
+              <InfoRow icon="people-outline" label="Members" value={customer.membersCount ? String(customer.membersCount) : ''} />
+              <InfoRow icon="car-outline" label="Vehicle" value={customer.vehicleNumber} />
+              <InfoRow icon="card-outline" label={customer.id_type || 'ID'} value={customer.id_number} />
+              <InfoRow icon="wallet-outline" label="Amount" value={amount.total > 0 ? describeAmount(amount) : customer.amount} last />
+            </>
           )}
-          <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={handleDelete}>
-            <Text style={styles.actionText}>Delete</Text>
-          </TouchableOpacity>
+        </Card>
+
+        <Card style={styles.card}>
+          <View style={styles.rowBetween}>
+            <AppText variant="overline" tone="muted">
+              ID photos {displayImageUrls.length ? `· ${displayImageUrls.length}` : ''}
+            </AppText>
+            <PressableScale onPress={() => fetchFreshData()} hitSlop={8} accessibilityRole="button" accessibilityLabel="Reload photos">
+              <View style={styles.reload}>
+                <Ionicons name="refresh" size={14} color={colors.brand} />
+                <AppText variant="caption" tone="brand">
+                  {imagesLoading ? 'Loading…' : 'Reload'}
+                </AppText>
+              </View>
+            </PressableScale>
+          </View>
+          {displayImageUrls.length > 0 ? (
+            <View style={styles.gallery}>
+              {displayImageUrls.map((uri: string, idx: number) => (
+                <PressableScale key={`${uri}-${idx}`} onPress={() => setViewerUri(uri)} scaleTo={0.97} style={styles.galleryItem} accessibilityLabel={`ID photo ${idx + 1}`}>
+                  <Image source={mediaImageSource(uri)} style={styles.galleryImg} />
+                </PressableScale>
+              ))}
+            </View>
+          ) : (
+            <View style={styles.noPhotos}>
+              <Ionicons name="image-outline" size={28} color={colors.inkMuted} />
+              <AppText variant="footnote" tone="muted">
+                {imagesLoading ? 'Fetching photos…' : 'No ID photos available'}
+              </AppText>
+            </View>
+          )}
+        </Card>
+
+        {isAdmin && !editing ? (
+          <Button title="Delete guest" icon="trash-outline" variant="danger" onPress={handleDelete} fullWidth style={{ marginTop: space.sm }} />
+        ) : null}
+      </ScrollView>
+
+      {editing ? (
+        <View style={styles.footer}>
+          <Button title="Cancel" variant="secondary" size="lg" onPress={() => { setEditing(false); fetchFreshData(); }} style={{ flex: 1 }} />
+          <Button title="Save changes" icon="checkmark" size="lg" onPress={handleSave} style={{ flex: 1.6 }} />
         </View>
       ) : null}
-    </ScrollView>
+
+      <Modal visible={!!viewerUri} transparent animationType="fade" onRequestClose={() => setViewerUri(null)} statusBarTranslucent>
+        <Pressable style={styles.viewer} onPress={() => setViewerUri(null)} accessibilityLabel="Close photo">
+          {viewerUri ? <Image source={mediaImageSource(viewerUri)} style={styles.viewerImg} resizeMode="contain" /> : null}
+          <View style={styles.viewerClose}>
+            <Ionicons name="close" size={26} color={colors.inkInverse} />
+          </View>
+        </Pressable>
+      </Modal>
+    </SafeAreaView>
   );
 };
 
-const InfoInput = ({
-  label,
-  value,
-  editable,
-  onChange,
-  keyboardType,
-}: {
-  label: string;
-  value?: string | number;
-  editable: boolean;
-  onChange: (v: string) => void;
-  keyboardType?: 'default' | 'numeric' | 'phone-pad' | 'email-address';
-}) => (
-  <View style={styles.infoRow}>
-    <Text style={styles.infoLabel}>{label}</Text>
-    {editable ? (
-      <TextInput
-        style={styles.infoInput}
-        value={value?.toString() || ''}
-        onChangeText={onChange}
-        keyboardType={keyboardType || 'default'}
-      />
-    ) : (
-      <Text style={styles.infoValue}>{value || '-'}</Text>
-    )}
-  </View>
-);
-
 const styles = StyleSheet.create({
-  container: {
-    padding: 16,
-    backgroundColor: '#f9fafb',
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#111827',
-    marginBottom: 12,
-  },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  infoLabel: {
-    color: '#6b7280',
-    fontSize: 14,
-  },
-  infoValue: {
-    color: '#111827',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  infoInput: {
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    minWidth: 180,
-    color: '#111827',
-  },
-  imageWrapper: {
-    marginTop: 16,
-    gap: 8,
-  },
-  imageLabel: {
-    color: '#374151',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  imageContainer: {
-    borderRadius: 10,
-    overflow: 'hidden',
-    backgroundColor: '#f3f4f6',
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-  },
-  idImage: {
-    width: '100%',
-    height: 220,
-    backgroundColor: '#e5e7eb',
-    resizeMode: 'contain',
-  },
-  imagePlaceholder: {
-    height: 120,
-    borderRadius: 10,
-    backgroundColor: '#f3f4f6',
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 8,
-  },
-  imagePlaceholderText: {
-    color: '#9ca3af',
-    fontSize: 13,
-  },
-  imageOverlay: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    padding: 4,
-  },
-  imageOverlayText: {
-    color: '#fff',
-    fontSize: 10,
-    textAlign: 'center',
-  },
-  actionsRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginTop: 12,
-  },
-  actionBtn: {
-    flex: 1,
-    alignItems: 'center',
-    padding: 14,
-    borderRadius: 10,
-  },
-  editBtn: {
-    backgroundColor: '#f59e0b',
-  },
-  saveBtn: {
-    backgroundColor: '#10b981',
-  },
-  deleteBtn: {
-    backgroundColor: '#ef4444',
-  },
-  actionText: {
-    color: '#fff',
-    fontWeight: '700',
-  },
+  safe: { flex: 1, backgroundColor: colors.bg },
+  content: { paddingHorizontal: GUTTER, paddingBottom: space.huge },
+  card: { marginBottom: space.md },
+  heroTop: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  pair: { flexDirection: 'row', gap: space.md },
+  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: space.md },
+  reload: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  gallery: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  galleryItem: { width: '48.5%' },
+  galleryImg: { width: '100%', aspectRatio: 4 / 3, borderRadius: radius.md, backgroundColor: colors.surfaceAlt },
+  noPhotos: { alignItems: 'center', gap: space.sm, paddingVertical: space.xl, backgroundColor: colors.surfaceAlt, borderRadius: radius.md },
+  footer: { flexDirection: 'row', gap: space.md, paddingHorizontal: GUTTER, paddingVertical: space.md, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.line },
+  viewer: { flex: 1, backgroundColor: 'rgba(0,0,0,0.94)', alignItems: 'center', justifyContent: 'center' },
+  viewerImg: { width: '100%', height: '80%' },
+  viewerClose: { position: 'absolute', top: 56, right: 20, width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
 });
 
 export default CustomerDetailScreen;

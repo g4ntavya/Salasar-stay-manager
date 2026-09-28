@@ -1,253 +1,146 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Animated } from 'react-native';
-import * as Haptics from 'expo-haptics';
-import { Swipeable } from 'react-native-gesture-handler';
-import { Ionicons } from '@expo/vector-icons';
+import React, { useEffect } from 'react';
+import { StyleSheet, View } from 'react-native';
+import Animated, { interpolateColor, useAnimatedStyle, useSharedValue, withDelay, withSequence, withTiming } from 'react-native-reanimated';
 import { Booking } from '../types';
-import StatusBadge from './StatusBadge';
+import { localDay } from '../utils/date';
+import {
+  AppText,
+  Avatar,
+  Button,
+  Card,
+  StatusPill,
+  SwipeRow,
+  bookingStatusPill,
+  colors,
+  formatRupees,
+  motion,
+  radius,
+  space,
+} from '../ui';
 
 interface BookingItemProps {
   booking: Booking;
   onPress: () => void;
   onEdit?: () => void;
-  onCheckout?: () => void;
+  /** Resolve false if the guest was not checked out (cancelled or failed). */
+  onCheckout?: () => Promise<boolean> | boolean;
+  /** Briefly marks the card, e.g. right after it was created. */
+  highlight?: boolean;
 }
 
-const BookingItem: React.FC<BookingItemProps> = ({ booking, onPress, onEdit, onCheckout }) => {
-  const normalizeToDate = (value: any): Date | null => {
-    if (!value) return null;
-    if (value instanceof Date) return value;
-    if (value?.toDate) {
-      try {
-        return value.toDate();
-      } catch { }
-    }
-    if (typeof value === 'string') {
-      const d = new Date(value);
-      if (!Number.isNaN(d.getTime())) return d;
-    }
-    return null;
-  };
+const toDate = (value: any): Date | null => {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  return isNaN(d.getTime()) ? null : d;
+};
+const fmtDay = (d: Date | null) => (d ? d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : '—');
+const fmtTime = (d: Date | null) => (d ? d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' }) : '');
 
-  const formatDateTime = (value: any) => {
-    const d = normalizeToDate(value);
-    if (!d) return 'N/A';
-    return d.toLocaleString('en-IN', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true,
-    });
-  };
+const paymentLabel = (mode?: string) => {
+  const m = String(mode || 'CASH').toUpperCase();
+  return m === 'MIXED' ? 'Cash + UPI' : m === 'UPI' ? 'UPI' : 'Cash';
+};
 
-  const roomLabel =
-    booking.room_numbers && booking.room_numbers.length > 0
-      ? booking.room_numbers.join(', ')
-      : booking.room?.room_number || 'N/A';
+/** One stay in the bookings list. Swipe left (or use the buttons) to edit or check out. */
+const BookingItem: React.FC<BookingItemProps> = ({ booking, onPress, onEdit, onCheckout, highlight }) => {
+  const b = booking as any;
+  const rooms: string[] = b.room_numbers?.length ? b.room_numbers : [b.room?.room_no || b.roomNo].filter(Boolean);
+  const checkedOut = String(b.status || '').toUpperCase().replace(/[\s_-]/g, '') === 'CHECKEDOUT';
+  const inDate = toDate(b.check_in || b.checkInDate);
+  const outDate = toDate(checkedOut && b.check_out_actual ? b.check_out_actual : b.check_out_expected || b.checkOutDate);
+  const noon = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12).getTime();
+  const nights = inDate && outDate ? Math.max(1, Math.round((noon(outDate) - noon(inDate)) / 86400000)) : null;
+  const today = localDay();
+  const overdue = !checkedOut && outDate && localDay(outDate) < today;
+  const leavesToday = !checkedOut && outDate && localDay(outDate) === today;
+  const pill = bookingStatusPill(b.status);
+  const canCheckout = !checkedOut && !!onCheckout;
 
-  const checkoutValue =
-    booking.status?.toString().toUpperCase() === 'CHECKED_OUT' && booking.check_out_actual
-      ? booking.check_out_actual
-      : booking.check_out_expected;
-
-  const badgeLabel = booking.status;
-
-  const handleEdit = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    if (onEdit) onEdit();
-  };
-
-  const renderRightActions = (
-    progress: Animated.AnimatedInterpolation<number>,
-    dragX: Animated.AnimatedInterpolation<number>
-  ) => {
-    const trans = dragX.interpolate({
-      inputRange: [-80, 0],
-      outputRange: [1, 0],
-      extrapolate: 'clamp',
-    });
-
-    const canCheckout = booking.status !== 'CHECKED_OUT' && onCheckout;
-
-    return (
-      <View style={[styles.rightActionContainer, { width: canCheckout ? 160 : 80 }]}>
-        <TouchableOpacity
-          onPress={handleEdit}
-          style={[styles.editAction, canCheckout && { marginRight: 4 }]}
-          activeOpacity={0.8}
-        >
-          <Animated.View style={{ transform: [{ scale: trans }], alignItems: 'center' }}>
-            <Ionicons name="pencil-outline" size={24} color="#fff" />
-            <Text style={styles.actionText}>Edit</Text>
-          </Animated.View>
-        </TouchableOpacity>
-        {canCheckout && (
-          <TouchableOpacity
-            onPress={() => {
-              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-              onCheckout();
-            }}
-            style={styles.checkoutAction}
-            activeOpacity={0.8}
-          >
-            <Animated.View style={{ transform: [{ scale: trans }], alignItems: 'center' }}>
-              <Ionicons name="exit-outline" size={24} color="#fff" />
-              <Text style={styles.actionText}>Checkout</Text>
-            </Animated.View>
-          </TouchableOpacity>
-        )}
-      </View>
+  const flash = useSharedValue(0);
+  useEffect(() => {
+    if (!highlight) return;
+    flash.set(
+      withSequence(
+        withTiming(1, { duration: motion.base, easing: motion.ease }),
+        withDelay(1200, withTiming(0, { duration: 1200, easing: motion.ease }))
+      )
     );
-  };
+  }, [highlight, flash]);
+  const flashStyle = useAnimatedStyle(() => ({
+    borderColor: interpolateColor(flash.get(), [0, 1], ['transparent', colors.brand]),
+    backgroundColor: interpolateColor(flash.get(), [0, 1], ['transparent', colors.brandSoft]),
+  }));
 
-  const content = (
-    <View style={styles.itemWrapper}>
-      <TouchableOpacity style={styles.item} onPress={onPress} activeOpacity={0.7}>
-        <View style={styles.header}>
-          <View style={styles.headerText}>
-            <Text style={styles.guestName}>{booking.customer?.name || 'Unknown Guest'}</Text>
-            <Text style={styles.roomNumber}>Room: {roomLabel}</Text>
-          </View>
-          <StatusBadge status={badgeLabel} small />
+  const card = (
+    <Card onPress={onPress} accessibilityLabel={`${b.customer?.name || 'Guest'}, room ${rooms.join(', ')}`} style={styles.card}>
+      <Animated.View style={[StyleSheet.absoluteFill, styles.flash, flashStyle]} pointerEvents="none" />
+      <View style={styles.top}>
+        <Avatar name={b.customer?.name} size={42} />
+        <View style={{ flex: 1 }}>
+          <AppText variant="bodyStrong" numberOfLines={1}>
+            {b.customer?.name || 'Guest'}
+          </AppText>
+          <AppText variant="footnote" tone="muted" numberOfLines={1}>
+            {rooms.length > 1 ? 'Rooms' : 'Room'} {rooms.join(', ') || '—'}
+            {b.customer?.mobile ? ` · ${b.customer.mobile}` : ''}
+          </AppText>
         </View>
-        <View style={styles.dates}>
-          <Text style={styles.dateText}>Check-in: {formatDateTime(booking.check_in)}</Text>
-          <Text style={styles.dateText}>Check-out: {formatDateTime(checkoutValue)}</Text>
+        <View style={{ alignItems: 'flex-end' }}>
+          <AppText variant="bodyStrong">{formatRupees(b.total_amount)}</AppText>
+          <AppText variant="caption" tone="muted">
+            {paymentLabel(b.payment_mode)}
+          </AppText>
         </View>
+      </View>
 
-        <View style={styles.footer}>
-          <View style={styles.paymentBadge}>
-            <Ionicons
-              name={booking.payment_mode === 'UPI' ? 'qr-code-outline' : 'cash-outline'}
-              size={14}
-              color="#6b7280"
-            />
-            <Text style={styles.paymentText}>{booking.payment_mode || 'CASH'}</Text>
-          </View>
-          <Text style={styles.amountText}>₹{booking.total_amount || 0}</Text>
-        </View>
-      </TouchableOpacity>
-    </View>
+      <View style={styles.dates}>
+        <AppText variant="callout">{fmtDay(inDate)}</AppText>
+        <View style={styles.line} />
+        <AppText variant="caption" tone="muted">
+          {nights ? `${nights} night${nights > 1 ? 's' : ''}` : ''}
+        </AppText>
+        <View style={styles.line} />
+        <AppText variant="callout" color={overdue ? colors.danger : undefined}>
+          {fmtDay(outDate)}
+          {checkedOut && b.check_out_actual ? `, ${fmtTime(toDate(b.check_out_actual))}` : ''}
+        </AppText>
+      </View>
+
+      <View style={styles.bottom}>
+        {overdue ? (
+          <StatusPill tone="cancelled" label="Past check-out" size="sm" />
+        ) : leavesToday ? (
+          <StatusPill tone="occupied" label="Leaves today" size="sm" />
+        ) : (
+          <StatusPill tone={pill.tone} label={pill.label} size="sm" />
+        )}
+        <View style={{ flex: 1 }} />
+        {onEdit && !checkedOut ? <Button title="Edit" icon="create-outline" size="sm" variant="secondary" onPress={onEdit} /> : null}
+        {canCheckout ? <Button title="Check out" icon="log-out-outline" size="sm" variant="primary" onPress={() => onCheckout!()} /> : null}
+      </View>
+    </Card>
   );
 
-  if (onEdit || onCheckout) {
-    return (
-      <Swipeable
-        renderRightActions={renderRightActions}
-        friction={2}
-        rightThreshold={40}
-        overshootRight={false}
-      >
-        {content}
-      </Swipeable>
-    );
-  }
-
-  return content;
+  if (!canCheckout) return <View style={styles.wrap}>{card}</View>;
+  return (
+    <SwipeRow
+      style={styles.wrap}
+      primary={{ label: 'Check out', icon: 'log-out-outline', color: colors.brand, onAction: () => onCheckout!() }}
+      secondary={onEdit ? { label: 'Edit', icon: 'create-outline', color: colors.ink, onAction: onEdit } : undefined}
+    >
+      {card}
+    </SwipeRow>
+  );
 };
 
 const styles = StyleSheet.create({
-  itemWrapper: {
-    paddingHorizontal: 4,
-    backgroundColor: 'transparent',
-  },
-  item: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 4,
-    borderWidth: 1,
-    borderColor: '#f3f4f6',
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 12,
-  },
-  headerText: {
-    flex: 1,
-    paddingRight: 8,
-  },
-  guestName: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#111827',
-    marginBottom: 2,
-  },
-  roomNumber: {
-    fontSize: 14,
-    color: '#6b7280',
-    fontWeight: '500',
-  },
-  dates: {
-    marginBottom: 12,
-  },
-  dateText: {
-    fontSize: 14,
-    color: '#4b5563',
-    marginBottom: 4,
-  },
-  footer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 8,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#f3f4f6',
-  },
-  paymentBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#f9fafb',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 8,
-  },
-  paymentText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#6b7280',
-  },
-  amountText: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#dc2626',
-  },
-  rightActionContainer: {
-    marginBottom: 12,
-    paddingRight: 4,
-    flexDirection: 'row',
-  },
-  editAction: {
-    backgroundColor: '#3b82f6',
-    justifyContent: 'center',
-    alignItems: 'center',
-    flex: 1,
-    borderRadius: 12,
-  },
-  checkoutAction: {
-    backgroundColor: '#10b981',
-    justifyContent: 'center',
-    alignItems: 'center',
-    flex: 1,
-    borderRadius: 12,
-  },
-  actionText: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '700',
-    marginTop: 4,
-  },
+  wrap: { marginBottom: space.md },
+  card: { gap: space.md, overflow: 'hidden' },
+  flash: { borderRadius: radius.lg, borderWidth: 1.5 },
+  top: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  dates: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  line: { flex: 1, height: 1, backgroundColor: colors.line },
+  bottom: { flexDirection: 'row', alignItems: 'center', gap: space.sm, borderTopWidth: StyleSheet.hairlineWidth * 2, borderTopColor: colors.line, paddingTop: space.md },
 });
 
 export default BookingItem;

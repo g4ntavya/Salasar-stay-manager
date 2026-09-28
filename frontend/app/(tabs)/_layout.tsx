@@ -1,104 +1,45 @@
 import React from 'react';
-import { Tabs } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-
+import { Tabs, useRouter } from 'expo-router';
 import { useAuth } from '../../src/context/AuthContext';
+import { AppTabBar, type TabSpec } from '../../src/ui/TabBar';
+import { colors } from '../../src/theme';
+
+const STAFF_TABS: TabSpec[] = [
+  { name: 'dashboard', label: 'Home', icon: 'home-outline', iconActive: 'home' },
+  { name: 'bookings', label: 'Bookings', icon: 'calendar-clear-outline', iconActive: 'calendar-clear' },
+  { name: 'rooms', label: 'Rooms', icon: 'bed-outline', iconActive: 'bed' },
+  { name: 'customers', label: 'Guests', icon: 'people-outline', iconActive: 'people' },
+];
+
+const GROWTH_TABS: TabSpec[] = [{ name: 'analytics', label: 'Insights', icon: 'trending-up-outline', iconActive: 'trending-up' }];
 
 export default function TabLayout() {
-  const insets = useSafeAreaInsets();
-  const bottomInset = Math.max(insets.bottom, 12);
   const { profile } = useAuth();
+  const router = useRouter();
   const isGrowthUser = profile?.role === 'GROWTH';
 
   return (
     <Tabs
-      screenOptions={{
-        tabBarActiveTintColor: '#dc2626',
-        tabBarInactiveTintColor: '#9ca3af',
-        tabBarStyle: {
-          backgroundColor: '#fff',
-          borderTopWidth: 1,
-          borderTopColor: '#e5e7eb',
-          paddingBottom: bottomInset,
-          paddingTop: 10,
-          height: 60 + bottomInset,
-        },
-        tabBarLabelStyle: {
-          fontSize: 12,
-          fontWeight: '500',
-        },
-        headerStyle: {
-          backgroundColor: '#dc2626',
-        },
-        headerStatusBarHeight: insets.top,
-        headerTintColor: '#fff',
-        headerTitleStyle: {
-          fontWeight: 'bold',
-        },
-        lazy: false,
-      }}
+      screenOptions={{ headerShown: false, lazy: false, sceneStyle: { backgroundColor: colors.bg } }}
+      tabBar={props =>
+        isGrowthUser ? (
+          <AppTabBar {...props} tabs={GROWTH_TABS} />
+        ) : (
+          <AppTabBar
+            {...props}
+            tabs={STAFF_TABS}
+            centerAction={{ icon: 'add', label: 'New booking', after: 2, onPress: () => router.push('/new-booking') }}
+          />
+        )
+      }
     >
-      <Tabs.Screen
-        name="dashboard"
-        options={{
-          title: 'Dashboard',
-          href: isGrowthUser ? null : undefined,
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="home" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="bookings"
-        options={{
-          title: 'Bookings',
-          href: isGrowthUser ? null : undefined,
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="calendar-outline" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="analytics"
-        options={{
-          title: 'Growth',
-          href: isGrowthUser ? undefined : null,
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="trending-up" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="rooms"
-        options={{
-          title: 'Rooms',
-          href: isGrowthUser ? null : undefined,
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="bed" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="customers"
-        options={{
-          title: 'Customers',
-          href: isGrowthUser ? null : undefined,
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="people" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="profile"
-        options={{
-          title: 'Profile',
-          href: isGrowthUser ? null : undefined,
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="person" size={size} color={color} />
-          ),
-        }}
-      />
+      {/* Profile and Analytics stay routable for staff (opened from Home), just not in the bar. */}
+      <Tabs.Screen name="dashboard" />
+      <Tabs.Screen name="bookings" />
+      <Tabs.Screen name="rooms" />
+      <Tabs.Screen name="customers" />
+      <Tabs.Screen name="analytics" />
+      <Tabs.Screen name="profile" />
     </Tabs>
   );
 }

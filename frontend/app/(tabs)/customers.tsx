@@ -1,792 +1,292 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  SectionList,
-  TouchableOpacity,
-  RefreshControl,
-  TextInput,
-  Animated,
-  Alert,
-  ActivityIndicator,
-  Modal,
-  FlatList,
-} from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, SectionList, StyleSheet, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
-import { Swipeable } from 'react-native-gesture-handler';
-import * as Haptics from 'expo-haptics';
-import { deleteCustomer, fetchCustomers, searchCustomers, type CustomerSearchResult } from '../../src/utils/rtdbService';
 import { Ionicons } from '@expo/vector-icons';
+import {
+  deleteCustomer,
+  searchCustomers,
+  subscribeToRecentGuests,
+  type CustomerSearchResult,
+  type GuestListItem,
+} from '../../src/utils/rtdbService';
 import { getCached, setCached } from '../../src/utils/cache';
-
-const PAGE_SIZE = 50;
-type CustomerListItem = {
-  id: string;
-  name: string;
-  mobile: string;
-  city?: string;
-  father_name?: string;
-  address?: string;
-  id_number?: string;
-  id_type?: string;
-  membersCount?: number;
-  vehicleNumber?: string;
-  createdAt?: number;
-  checkInDate?: string;
-  idImageUrl?: string;
-  idImageUrls?: string[];
-};
+import {
+  AppText,
+  Avatar,
+  Card,
+  Chip,
+  ChipRow,
+  EmptyState,
+  Field,
+  PressableScale,
+  ScreenHeader,
+  Segmented,
+  SkeletonList,
+  SwipeRow,
+  colors,
+  haptic,
+  radius,
+  space,
+  useTabBarSpace,
+  GUTTER,
+} from '../../src/ui';
 
 type SortMode = 'recent' | 'month';
-type MonthKey = string;
+
+const monthKeyOf = (ts: number) => {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+const monthLabel = (key: string) => {
+  const [y, m] = key.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+};
+
+/** One row per guest: repeat visits with the same mobile number show once (the latest). */
+const uniqueGuests = (list: GuestListItem[]) => {
+  const seen = new Set<string>();
+  return list.filter(g => {
+    const key = g.mobile.trim() ? `m:${g.mobile.trim()}` : `id:${g.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
 
 const CustomersScreen = () => {
   const router = useRouter();
-  const [customers, setCustomers] = useState<CustomerListItem[]>([]);
-  const [loading, setLoading] = useState(true); // Start with loading = true
-  const [refreshing, setRefreshing] = useState(false);
+  const bottomSpace = useTabBarSpace();
+  const [guests, setGuests] = useState<GuestListItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [sortMode, setSortMode] = useState<SortMode>('recent');
-  const [selectedMonth, setSelectedMonth] = useState<MonthKey | 'all'>('all');
-  const [monthPickerOpen, setMonthPickerOpen] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState<string>('all');
   const [searchText, setSearchText] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
-  const mountedRef = useRef(true);
-  const loadedOnce = useRef(false);
-  const isFetching = useRef(false);
-  const hasCachedDisplayRef = useRef(false);
+  const [allMatches, setAllMatches] = useState<CustomerSearchResult[]>([]);
 
+  // Last known list instantly, then live: new guests and edits appear without refreshing.
   useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
-
-  // Load from cache FIRST, then fetch fresh data
-  useEffect(() => {
-    const initialize = async () => {
-      // Step 1: Show cached data IMMEDIATELY
-      try {
-        const cached = await getCached<CustomerListItem[]>('customers:recent');
-        if (cached && cached.length > 0 && mountedRef.current) {
-          const seenMobiles = new Set<string>();
-          const seenNameDate = new Set<string>();
-
-          const deduplicated = cached.filter(c => {
-            const mobile = (c.mobile || '').trim();
-            const name = (c.name || '').toLowerCase().trim();
-            const date = c.checkInDate || '';
-
-            const mobileKey = mobile ? `m:${mobile}` : '';
-            const nameDateKey = name && date ? `nd:${name}:${date}` : '';
-
-            if (mobileKey && seenMobiles.has(mobileKey)) return false;
-            if (nameDateKey && seenNameDate.has(nameDateKey)) return false;
-
-            if (mobileKey) seenMobiles.add(mobileKey);
-            if (nameDateKey) seenNameDate.add(nameDateKey);
-            return true;
-          });
-
-          console.log('[Customers] Cache load:', deduplicated.length, 'unique');
-          setCustomers(deduplicated);
-          setLoading(false);
-          loadedOnce.current = true;
-          hasCachedDisplayRef.current = true;
-        }
-      } catch (e) {
-        console.log('[Customers] No cache available');
-      }
-
-      loadData();
-    };
-
-    initialize();
-  }, []);
-
-  // Refresh on focus if data is stale
-  useFocusEffect(
-    useCallback(() => {
-      if (!loadedOnce.current) return;
-
-      // Check if we need to reload (e.g., after returning from another screen)
-      // Using functional state update to avoid stale closure
-      setCustomers(prev => {
-        if (prev.length === 0 && loadedOnce.current) {
-          // Trigger reload in next tick to avoid state update during render
-          setTimeout(() => loadData(), 0);
-        }
-        return prev;
-      });
-    }, [])
-  );
-
-  const loadData = useCallback(async () => {
-    if (isFetching.current) return;
-    isFetching.current = true;
-
-    // Don't show loading when we already have cache on screen (avoids flash)
-    if (!hasCachedDisplayRef.current) {
-      setLoading(true);
-    }
-
-    try {
-      const data = await fetchCustomers(PAGE_SIZE);
-      const cached = await getCached<any[]>('customers:recent') || [];
-
-      if (!mountedRef.current) return;
-
-      // 🔥 SMART MERGE: Preserve local images (file://) if server hasn't updated yet
-      const mergedData = data.map(fresh => {
-        const local = cached.find((c: any) => c.id === fresh.id);
-        const hasFreshImages = fresh.idImageUrls && fresh.idImageUrls.length > 0;
-        const hasLocalImages = local && local.idImageUrls && local.idImageUrls.length > 0;
-
-        if (!hasFreshImages && hasLocalImages) {
-          const isOptimistic = local.idImageUrls.some((u: string) => u.startsWith('file://') || u.startsWith('pending:'));
-          if (isOptimistic) {
-            console.log(`[Customers] Merging optimistic images for ${fresh.name}`);
-            return { ...fresh, idImageUrls: local.idImageUrls, idImageUrl: local.idImageUrl };
-          }
-        }
-        return fresh;
-      });
-
-      // Sort by most recent first
-      const sorted = [...mergedData].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-
-      // Remove duplicates using multiple criteria
-      const seenMobiles = new Set<string>();
-      const seenNameDate = new Set<string>();
-
-      const deduplicated = sorted.filter(customer => {
-        const mobile = (customer.mobile || '').trim();
-        const name = (customer.name || '').toLowerCase().trim();
-        const date = customer.checkInDate || '';
-
-        // Create multiple keys to catch duplicates
-        const mobileKey = mobile ? `m:${mobile}` : '';
-        const nameDateKey = name && date ? `nd:${name}:${date}` : '';
-        const nameOnlyKey = name ? `n:${name}` : '';
-
-        // Check if we've seen this mobile number before
-        if (mobileKey && seenMobiles.has(mobileKey)) {
-          return false;
-        }
-
-        // Check if we've seen this name + date combo before
-        if (nameDateKey && seenNameDate.has(nameDateKey)) {
-          return false;
-        }
-
-        // Also check if same name with same mobile (different formatting)
-        if (nameOnlyKey && mobile && seenMobiles.has(nameOnlyKey + ':' + mobile.slice(-4))) {
-          return false;
-        }
-
-        // Mark as seen
-        if (mobileKey) seenMobiles.add(mobileKey);
-        if (nameDateKey) seenNameDate.add(nameDateKey);
-        if (nameOnlyKey && mobile) seenMobiles.add(nameOnlyKey + ':' + mobile.slice(-4));
-
-        return true;
-      });
-
-      setCustomers(deduplicated);
-      await setCached('customers:recent', deduplicated);
-      loadedOnce.current = true;
-      console.log('[Customers] Loaded:', deduplicated.length, 'unique (removed', sorted.length - deduplicated.length, 'duplicates)');
-    } catch (err) {
-      console.error('[Customers] Fetch error:', err);
-    } finally {
-      if (mountedRef.current) {
+    let live = false;
+    getCached<GuestListItem[]>('guests:recent').then(cached => {
+      if (!live && Array.isArray(cached) && cached.length) {
+        setGuests(cached);
         setLoading(false);
-        setRefreshing(false);
       }
-      isFetching.current = false;
-    }
+    });
+    return subscribeToRecentGuests(
+      list => {
+        live = true;
+        const unique = uniqueGuests(list);
+        setGuests(unique);
+        setLoading(false);
+        setCached('guests:recent', unique);
+      },
+      error => {
+        console.warn('[Guests] Live list failed:', error);
+        setLoading(false);
+      }
+    );
   }, []);
 
-  const onRefresh = useCallback(async () => {
-    setRefreshing(true);
-    hasCachedDisplayRef.current = false;
-    await setCached('customers:recent', null);
-    isFetching.current = false;
-    loadData();
-  }, [loadData]);
-
-  // Debounce search
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(searchText), 300);
+    const timer = setTimeout(() => setDebouncedSearch(searchText), 250);
     return () => clearTimeout(timer);
   }, [searchText]);
 
-  // Search every guest ever recorded (on-device index), not just the loaded page.
-  const [allMatches, setAllMatches] = useState<CustomerSearchResult[]>([]);
+  // Search covers every guest ever recorded (on-device index), not just the recent ones.
   useEffect(() => {
-    let cancelled = false;
     const q = debouncedSearch.trim();
-    if (q.length < 2) {
-      setAllMatches([]);
-      return;
-    }
+    if (q.length < 2) return;
+    let cancelled = false;
     searchCustomers(q)
       .then(results => !cancelled && setAllMatches(results))
-      .catch(err => console.warn('[Customers] Search failed:', err));
+      .catch(err => console.warn('[Guests] Search failed:', err));
     return () => {
       cancelled = true;
     };
   }, [debouncedSearch]);
 
-  // Date helpers
-  const normalizeDate = (c: CustomerListItem) => {
-    if (typeof c.createdAt === 'number') return new Date(c.createdAt);
-    if (c.checkInDate) return new Date(c.checkInDate);
-    return new Date(0);
-  };
-
-  const getMonthKey = (d: Date): MonthKey =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-
-  const monthLabel = (key: MonthKey) => {
-    const [year, month] = key.split('-').map((v) => Number(v));
-    const date = new Date(year, month - 1, 1);
-    return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-  };
-
-  // Filter by search
-  const searchFiltered = useMemo(() => {
-    if (!debouncedSearch.trim()) return customers;
-    const search = debouncedSearch.toLowerCase().trim();
-    const loaded = customers.filter(c =>
-      c.name?.toLowerCase().includes(search) ||
-      c.mobile?.includes(search) ||
-      c.vehicleNumber?.toLowerCase().includes(search)
+  const query = debouncedSearch.trim().toLowerCase();
+  const matches = useMemo(() => {
+    if (query.length < 2) return guests;
+    const recent = guests.filter(
+      g => g.name.toLowerCase().includes(query) || g.mobile.includes(query) || g.vehicleNumber.toLowerCase().includes(query)
     );
-    const loadedIds = new Set(loaded.map(c => c.id));
-    const older = allMatches.filter(m => !loadedIds.has(m.id));
-    return [...loaded, ...older];
-  }, [customers, debouncedSearch, allMatches]);
+    const ids = new Set(recent.map(g => g.id));
+    const older = allMatches.filter(m => !ids.has(m.id)).map(m => ({ ...m, createdAt: m.createdAt || 0 }));
+    return uniqueGuests([...recent, ...older]);
+  }, [guests, allMatches, query]);
 
-  // Group by month
-  const monthGroups = useMemo(() => {
-    const groups = new Map<MonthKey, CustomerListItem[]>();
-    searchFiltered.forEach((c) => {
-      const d = normalizeDate(c);
-      const key = getMonthKey(d);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)?.push(c);
-    });
-    const entries = Array.from(groups.entries()).sort((a, b) => (a[0] < b[0] ? 1 : -1));
-    return entries.map(([key, items]) => ({
-      key,
-      title: `${monthLabel(key)} · ${items.length} visits`,
-      data: items,
-    }));
-  }, [searchFiltered]);
-
-  // Available months for picker
-  const availableMonths = useMemo(() => {
-    const months = new Set<MonthKey>();
-    customers.forEach(c => {
-      const d = normalizeDate(c);
-      months.add(getMonthKey(d));
-    });
-    return Array.from(months).sort((a, b) => (a < b ? 1 : -1));
-  }, [customers]);
-
-  // Filter by selected month
-  const filteredByMonth = useMemo(() => {
-    if (selectedMonth === 'all') return searchFiltered;
-    return searchFiltered.filter(c => {
-      const d = normalizeDate(c);
-      return getMonthKey(d) === selectedMonth;
-    });
-  }, [searchFiltered, selectedMonth]);
-
-  // Final sections for display
-  const filteredSections = useMemo(() => {
-    if (sortMode === 'recent') {
-      return [{ key: 'recent', title: '', data: filteredByMonth }];
-    }
-    if (selectedMonth === 'all') {
-      return monthGroups;
-    }
-    return [{
-      key: selectedMonth,
-      title: `${monthLabel(selectedMonth)} · ${filteredByMonth.length} visits`,
-      data: filteredByMonth,
-    }];
-  }, [sortMode, filteredByMonth, monthGroups, selectedMonth]);
-
-  const handleDeleteCustomer = useCallback((customer: CustomerListItem) => {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    Alert.alert(
-      'Delete Customer',
-      `Are you sure you want to delete ${customer.name}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await deleteCustomer(customer.id);
-              setCustomers(prev => prev.filter(c => c.id !== customer.id));
-              const cached = await getCached<CustomerListItem[]>('customers:recent');
-              if (cached) {
-                await setCached('customers:recent', cached.filter(c => c.id !== customer.id));
-              }
-            } catch (error) {
-              Alert.alert('Error', 'Failed to delete customer');
-            }
-          }
-        }
-      ]
-    );
-  }, []);
-
-  const renderCustomer = useCallback(({ item }: { item: CustomerListItem }) => {
-    const date = normalizeDate(item);
-    const day = date.getDate();
-    const month = date.toLocaleString('en-US', { month: 'short' }).toUpperCase();
-
-    const renderRightActions = (
-      progress: Animated.AnimatedInterpolation<number>,
-      dragX: Animated.AnimatedInterpolation<number>
-    ) => {
-      const trans = dragX.interpolate({
-        inputRange: [-80, 0],
-        outputRange: [1, 0],
-        extrapolate: 'clamp',
-      });
-
-      return (
-        <View style={styles.rightActionContainer}>
-          <TouchableOpacity
-            onPress={() => handleDeleteCustomer(item)}
-            style={styles.deleteAction}
-            activeOpacity={0.8}
-          >
-            <Animated.View style={{ transform: [{ scale: trans }], alignItems: 'center' }}>
-              <Ionicons name="trash-outline" size={24} color="#fff" />
-              <Text style={styles.deleteText}>Delete</Text>
-            </Animated.View>
-          </TouchableOpacity>
-        </View>
-      );
-    };
-
-    return (
-      <Swipeable
-        renderRightActions={renderRightActions}
-        friction={2}
-        rightThreshold={40}
-        overshootRight={false}
-      >
-        <TouchableOpacity
-          style={styles.customerCard}
-          onPress={() => router.push(`/customer-detail/${item.id}` as any)}
-          activeOpacity={0.7}
-        >
-          <View style={styles.avatar}>
-            <Ionicons name="person" size={24} color="#fff" />
-          </View>
-          <View style={styles.customerInfo}>
-            <Text style={styles.customerName}>{item.name}</Text>
-            <Text style={styles.customerMobile}>{item.mobile}</Text>
-            {item.vehicleNumber && (
-              <Text style={styles.customerVehicle}>🚗 {item.vehicleNumber}</Text>
-            )}
-          </View>
-          <View style={styles.dateContainer}>
-            <Text style={styles.dateDay}>{day}</Text>
-            <Text style={styles.dateMonth}>{month}</Text>
-          </View>
-        </TouchableOpacity>
-      </Swipeable>
-    );
-  }, [handleDeleteCustomer, router]);
-
-  const renderSectionHeader = useCallback(({ section }: { section: { title: string } }) => {
-    if (!section.title) return null;
-    return <Text style={styles.sectionTitle}>{section.title}</Text>;
-  }, []);
-
-  const renderEmpty = () => {
-    if (loading) {
-      return (
-        <View style={styles.emptyContainer}>
-          <ActivityIndicator size="large" color="#dc2626" />
-          <Text style={styles.loadingText}>Loading customers...</Text>
-        </View>
-      );
-    }
-    return (
-      <View style={styles.emptyContainer}>
-        <Ionicons name="people-outline" size={64} color="#d1d5db" />
-        <Text style={styles.emptyText}>No customers found</Text>
-        <TouchableOpacity style={styles.retryButton} onPress={onRefresh}>
-          <Text style={styles.retryText}>Tap to retry</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  };
-
-  // Month Picker Modal
-  const renderMonthPicker = () => (
-    <Modal
-      visible={monthPickerOpen}
-      transparent
-      animationType="fade"
-      onRequestClose={() => setMonthPickerOpen(false)}
-    >
-      <TouchableOpacity
-        style={styles.modalOverlay}
-        activeOpacity={1}
-        onPress={() => setMonthPickerOpen(false)}
-      >
-        <View style={styles.monthPickerContainer}>
-          <Text style={styles.monthPickerTitle}>Select Month</Text>
-          <TouchableOpacity
-            style={[styles.monthOption, selectedMonth === 'all' && styles.monthOptionActive]}
-            onPress={() => { setSelectedMonth('all'); setMonthPickerOpen(false); }}
-          >
-            <Ionicons name="calendar" size={20} color={selectedMonth === 'all' ? '#dc2626' : '#6b7280'} />
-            <Text style={[styles.monthOptionText, selectedMonth === 'all' && styles.monthOptionTextActive]}>
-              All months
-            </Text>
-          </TouchableOpacity>
-          <FlatList
-            data={availableMonths}
-            keyExtractor={(item) => item}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={[styles.monthOption, selectedMonth === item && styles.monthOptionActive]}
-                onPress={() => { setSelectedMonth(item); setMonthPickerOpen(false); }}
-              >
-                <Text style={[styles.monthOptionText, selectedMonth === item && styles.monthOptionTextActive]}>
-                  {monthLabel(item)}
-                </Text>
-              </TouchableOpacity>
-            )}
-            style={{ maxHeight: 300 }}
-          />
-        </View>
-      </TouchableOpacity>
-    </Modal>
+  const months = useMemo(
+    () => Array.from(new Set(guests.filter(g => g.createdAt).map(g => monthKeyOf(g.createdAt)))).sort((a, b) => (a < b ? 1 : -1)),
+    [guests]
   );
 
-  return (
-    <View style={styles.container}>
-      <TextInput
-        style={styles.searchInput}
-        placeholder="Search by name or vehicle number"
-        placeholderTextColor="#9ca3af"
+  const sections = useMemo(() => {
+    const inMonth = selectedMonth === 'all' ? matches : matches.filter(g => g.createdAt && monthKeyOf(g.createdAt) === selectedMonth);
+    if (sortMode === 'recent') return [{ key: 'recent', title: '', data: inMonth }];
+    const groups = new Map<string, GuestListItem[]>();
+    inMonth.forEach(g => {
+      const key = g.createdAt ? monthKeyOf(g.createdAt) : 'unknown';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(g);
+    });
+    return Array.from(groups.entries())
+      .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+      .map(([key, data]) => ({ key, title: `${key === 'unknown' ? 'Earlier' : monthLabel(key)} · ${data.length}`, data }));
+  }, [matches, selectedMonth, sortMode]);
+
+  const confirmDelete = useCallback(
+    (guest: GuestListItem) =>
+      new Promise<boolean>(resolve => {
+        haptic.warning();
+        Alert.alert('Delete guest?', `${guest.name} and all their stays will be removed from the app. The VM archive keeps a copy.`, [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await deleteCustomer(guest.id);
+                resolve(true);
+              } catch {
+                Alert.alert('Could not delete', 'Check your connection and try again.');
+                resolve(false);
+              }
+            },
+          },
+        ]);
+      }),
+    []
+  );
+
+  const renderGuest = useCallback(
+    ({ item }: { item: GuestListItem }) => {
+      const date = item.createdAt ? new Date(item.createdAt) : null;
+      return (
+        <SwipeRow
+          style={styles.rowWrap}
+          primary={{ label: 'Delete', icon: 'trash-outline', color: colors.danger, onAction: () => confirmDelete(item) }}
+        >
+          <Card onPress={() => router.push(`/customer-detail/${item.id}`)} style={styles.row} accessibilityLabel={item.name}>
+            <Avatar name={item.name} size={44} />
+            <View style={{ flex: 1 }}>
+              <AppText variant="bodyStrong" numberOfLines={1}>
+                {item.name || 'Guest'}
+              </AppText>
+              <AppText variant="footnote" tone="muted" numberOfLines={1}>
+                {[item.mobile, item.vehicleNumber].filter(Boolean).join('  ·  ') || 'No contact saved'}
+              </AppText>
+            </View>
+            {date ? (
+              <View style={styles.dateBadge}>
+                <AppText variant="numberSm" style={{ fontSize: 19, lineHeight: 23 }}>
+                  {date.getDate()}
+                </AppText>
+                <AppText variant="caption" tone="muted" style={{ fontSize: 10, lineHeight: 12 }}>
+                  {date.toLocaleString('en-IN', { month: 'short' })}
+                </AppText>
+              </View>
+            ) : null}
+          </Card>
+        </SwipeRow>
+      );
+    },
+    [confirmDelete, router]
+  );
+
+  const searching = query.length >= 2;
+  const header = (
+    <View>
+      <ScreenHeader
+        title="Guests"
+        subtitle={loading ? 'Loading…' : searching ? `${matches.length} match${matches.length === 1 ? '' : 'es'} across all guests` : `${guests.length} recent guests`}
+      />
+      <Field
+        icon="search-outline"
+        placeholder="Search name, mobile or vehicle"
         value={searchText}
         onChangeText={setSearchText}
         autoCapitalize="none"
-        autoCorrect={false}
-        clearButtonMode="while-editing"
-      />
-
-      <View style={styles.controlsRow}>
-        <View style={styles.sortToggle}>
-          <TouchableOpacity
-            style={[styles.toggleBtn, sortMode === 'recent' && styles.toggleBtnActive]}
-            onPress={() => setSortMode('recent')}
-          >
-            <Text style={[styles.toggleText, sortMode === 'recent' && styles.toggleTextActive]}>
-              Recently added
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.toggleBtn, sortMode === 'month' && styles.toggleBtnActive]}
-            onPress={() => setSortMode('month')}
-          >
-            <Text style={[styles.toggleText, sortMode === 'month' && styles.toggleTextActive]}>
-              By month
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        <TouchableOpacity
-          style={styles.monthDropdown}
-          onPress={() => setMonthPickerOpen(true)}
-        >
-          <Ionicons name="calendar-outline" size={18} color="#6b7280" />
-          <Text style={styles.monthDropdownText}>
-            {selectedMonth === 'all' ? 'All months' : monthLabel(selectedMonth)}
-          </Text>
-          <Ionicons name="chevron-down" size={16} color="#6b7280" />
-        </TouchableOpacity>
-      </View>
-
-      <SectionList
-        sections={filteredSections}
-        renderItem={renderCustomer}
-        renderSectionHeader={renderSectionHeader}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.listContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#dc2626']} />
+        returnKeyType="search"
+        style={{ marginBottom: space.md }}
+        right={
+          searchText ? (
+            <PressableScale onPress={() => setSearchText('')} hitSlop={10} accessibilityLabel="Clear search">
+              <Ionicons name="close-circle" size={18} color={colors.inkMuted} />
+            </PressableScale>
+          ) : null
         }
-        initialNumToRender={20}
-        windowSize={10}
-        maxToRenderPerBatch={15}
-        removeClippedSubviews={true}
-        stickySectionHeadersEnabled={true}
-        ListEmptyComponent={renderEmpty}
-        showsVerticalScrollIndicator={false}
       />
-
-      {renderMonthPicker()}
-
-      <TouchableOpacity
-        style={styles.fab}
-        onPress={() => router.push('/new-booking' as any)}
-      >
-        <Ionicons name="add" size={28} color="#fff" />
-      </TouchableOpacity>
+      <Segmented
+        value={sortMode}
+        onChange={setSortMode}
+        options={[
+          { value: 'recent', label: 'Recent' },
+          { value: 'month', label: 'By month' },
+        ]}
+        style={{ marginBottom: space.md }}
+      />
+      {months.length > 1 ? (
+        <ChipRow style={{ marginBottom: space.lg }}>
+          <Chip label="All months" selected={selectedMonth === 'all'} onPress={() => setSelectedMonth('all')} />
+          {months.map(m => (
+            <Chip key={m} label={monthLabel(m)} selected={selectedMonth === m} onPress={() => setSelectedMonth(m)} />
+          ))}
+        </ChipRow>
+      ) : (
+        <View style={{ height: space.sm }} />
+      )}
     </View>
+  );
+
+  return (
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <SectionList
+        sections={loading && guests.length === 0 ? [] : sections}
+        renderItem={renderGuest}
+        renderSectionHeader={({ section }) =>
+          section.title ? (
+            <View style={styles.sectionHeader}>
+              <AppText variant="caption" tone="soft">
+                {section.title}
+              </AppText>
+            </View>
+          ) : null
+        }
+        keyExtractor={item => item.id}
+        ListHeaderComponent={header}
+        contentContainerStyle={[styles.listContent, { paddingBottom: bottomSpace }]}
+        initialNumToRender={16}
+        windowSize={10}
+        stickySectionHeadersEnabled
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        showsVerticalScrollIndicator={false}
+        ListEmptyComponent={
+          loading ? (
+            <SkeletonList count={6} height={76} />
+          ) : (
+            <EmptyState
+              icon="people-outline"
+              title={searching ? 'No guest found' : 'No guests yet'}
+              message={searching ? `Nobody matches “${debouncedSearch.trim()}”. Try a mobile number or vehicle.` : 'Guests appear here after their first booking.'}
+            />
+          )
+        }
+      />
+    </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f9fafb',
-  },
-  searchInput: {
-    backgroundColor: '#fff',
-    borderColor: '#e5e7eb',
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 16,
-    color: '#111827',
-    margin: 16,
-    marginBottom: 8,
-  },
-  listContent: {
-    padding: 16,
-    paddingTop: 8,
-    flexGrow: 1,
-  },
-  controlsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 8,
-  },
-  sortToggle: {
-    flexDirection: 'row',
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    borderRadius: 10,
-    overflow: 'hidden',
-    backgroundColor: '#fff',
-  },
-  toggleBtn: {
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-  },
-  toggleBtnActive: {
-    backgroundColor: '#fee2e2',
-  },
-  toggleText: {
-    color: '#6b7280',
-    fontWeight: '600',
-    fontSize: 13,
-  },
-  toggleTextActive: {
-    color: '#dc2626',
-  },
-  monthDropdown: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    gap: 6,
-  },
-  monthDropdownText: {
-    color: '#374151',
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  customerCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#dc2626',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-    overflow: 'hidden',
-  },
-  customerInfo: {
-    flex: 1,
-  },
-  customerName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1f2937',
-    marginBottom: 4,
-  },
-  customerMobile: {
-    fontSize: 14,
-    color: '#6b7280',
-  },
-  customerVehicle: {
-    fontSize: 13,
-    color: '#9ca3af',
-    marginTop: 2,
-  },
-  dateContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 12,
-  },
-  dateDay: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#1f2937',
-    lineHeight: 28,
-  },
-  dateMonth: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#6b7280',
-    letterSpacing: 0.5,
-  },
-  emptyContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 64,
-  },
-  emptyText: {
-    fontSize: 16,
-    color: '#9ca3af',
-    marginTop: 16,
-  },
-  loadingText: {
-    fontSize: 14,
-    color: '#6b7280',
-    marginTop: 12,
-  },
-  retryButton: {
-    marginTop: 16,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: '#fee2e2',
-    borderRadius: 8,
-  },
-  retryText: {
-    color: '#dc2626',
-    fontWeight: '600',
-  },
-  sectionTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#374151',
-    backgroundColor: '#f9fafb',
-    paddingVertical: 8,
-    paddingHorizontal: 4,
-  },
-  fab: {
-    position: 'absolute',
-    right: 20,
-    bottom: 20,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#dc2626',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    elevation: 6,
-  },
-  rightActionContainer: {
-    width: 80,
-    marginBottom: 12,
-  },
-  deleteAction: {
-    backgroundColor: '#ef4444',
-    justifyContent: 'center',
-    alignItems: 'center',
-    flex: 1,
-    borderRadius: 12,
-  },
-  deleteText: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '700',
-    marginTop: 4,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 32,
-  },
-  monthPickerContainer: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 16,
-    width: '100%',
-    maxWidth: 320,
-  },
-  monthPickerTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1f2937',
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  monthOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    gap: 10,
-  },
-  monthOptionActive: {
-    backgroundColor: '#fee2e2',
-  },
-  monthOptionText: {
-    fontSize: 15,
-    color: '#374151',
-  },
-  monthOptionTextActive: {
-    color: '#dc2626',
-    fontWeight: '600',
-  },
+  container: { flex: 1, backgroundColor: colors.bg },
+  listContent: { paddingHorizontal: GUTTER },
+  rowWrap: { marginBottom: space.sm + 2 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: space.md, paddingVertical: space.md },
+  dateBadge: { alignItems: 'center', minWidth: 44, paddingVertical: 4, paddingHorizontal: 6, borderRadius: radius.sm, backgroundColor: colors.surfaceAlt },
+  sectionHeader: { backgroundColor: colors.bg, paddingVertical: space.sm, marginBottom: space.xs },
 });
 
 export default CustomersScreen;
